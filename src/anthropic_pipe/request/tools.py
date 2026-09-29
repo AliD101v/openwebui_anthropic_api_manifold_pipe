@@ -236,17 +236,20 @@ class PipeRequestToolsMethods:
             # contain API-supported advisors, so a single membership check covers both
             # "unsupported" and "incompatible" cases.
             valid_advisors = {
-                "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-8": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-5": ["claude-opus-5"],
+                "claude-haiku-4-5": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-4-6": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-5": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"],
+                # Sonnet 5.5 rejects Opus 4.8 / 4.7 / 4.6 and Sonnet 5 advisors (400).
+                "claude-sonnet-5-5": ["claude-opus-5-5", "claude-opus-5"],
+                "claude-opus-4-6": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-7": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-8": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"],
+                "claude-opus-5-5": ["claude-opus-5-5", "claude-opus-5"],
+                "claude-opus-5": ["claude-opus-5-5", "claude-opus-5"],
                 "claude-fable-5": ["claude-fable-5"],
                 "claude-mythos-5": ["claude-mythos-5"],
             }
-            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5"])
+            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5-5", "claude-opus-5"])
 
             adjusted_advisor_model = advisor_model
             if advisor_model not in allowed_advisors:

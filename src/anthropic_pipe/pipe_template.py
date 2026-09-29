@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.27
+version: 0.9.28
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -33,11 +33,19 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5 / 4.8
+- Fast Mode for Opus 5.5 / 5 / 4.8
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.28
+- Added Claude Opus 5.5 (claude-opus-5-5): 1M context, 128k output, fast mode, compaction, dynamic filtering. Thinking is always on: `thinking:{"type":"disabled"}` is a 400 at every effort level, so the Thinking Toggle never sends it for this model and only decides whether an explicit adaptive `thinking` block (with `display`) is sent
+- Added Claude Sonnet 5.5 (claude-sonnet-5-5): 1M context, 128k output, compaction, dynamic filtering. `thinking:{"type":"disabled"}` is a 400 here too, so turning the Thinking Toggle off now sends `thinking:{"type":"between_tools"}` (the lowest thinking setting). Like disabled on Opus 5 it is only accepted up to effort 'high', so xhigh/max are clamped to 'high'
+- Forced `tool_choice` (`any` / `tool`) is a 400 on both 5.5 models: Web Search Enforcement and OpenWebUI's required / function tool_choice now go out as `auto`. web_search is still offered, the model just isn't forced to call it
+- REFUSAL_FALLBACK on Sonnet 5.5 always uses Anthropic's per-category 'default' routing, even when a pinned fallback model is selected: only the 'default' form is accepted for that model
+- Advisor: Opus 5.5 is now a selectable advisor and both 5.5 models have executor/advisor pairings. Sonnet 5.5 rejects Opus 4.8 / 4.7 / 4.6 and Sonnet 5 advisors (400), so the advisor is upgraded to Opus 5.5 for that executor
+- The memory-review model list knows about Opus 5.5 and Sonnet 5.5
+
 v0.9.27
 - Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
 - Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
@@ -1159,11 +1167,13 @@ class Pipe:
     # report max_tokens (custom/Azure endpoints, ENABLED_MODELS manual ids). The
     # live API value always wins for direct Anthropic. Keyed by base (suffix-stripped) id.
     MODEL_MAX_TOKENS_FALLBACK = {
+        "claude-opus-5-5": 128000,
         "claude-opus-5": 128000,
         "claude-opus-4-8": 128000,
         "claude-opus-4-7": 128000,
         "claude-opus-4-6": 128000,
         "claude-opus-4-5": 64000,
+        "claude-sonnet-5-5": 128000,
         "claude-sonnet-5": 128000,
         "claude-sonnet-4-6": 128000,
         "claude-sonnet-4-5": 64000,
@@ -1181,7 +1191,9 @@ class Pipe:
     # max_input_tokens as reported by /v1/models (verified 2026-08-10); Haiku 4.5
     # and Opus 4.5 are the 200k exceptions and stay on the generic default.
     MODEL_CONTEXT_LENGTH_FALLBACK = {
+        "claude-opus-5-5": 1000000,
         "claude-opus-5": 1000000,
+        "claude-sonnet-5-5": 1000000,
         "claude-sonnet-5": 1000000,
         "claude-fable-5": 1000000,
         "claude-mythos-5": 1000000,
@@ -1234,6 +1246,20 @@ class Pipe:
         "claude-sonnet-4-5": {
             "supports_structured_outputs": True,
         },
+        "claude-opus-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            # Thinking is always on. `thinking:{"type":"disabled"}` (and budget_tokens)
+            # are a 400 at every effort level, so the Thinking Toggle can never turn
+            # it off; omitting the field just runs adaptive thinking.
+            "thinking_on_by_default": True,
+            "thinking_can_disable": False,
+            # Forced tool_choice (`any` / `tool`) is a 400.
+            "forced_tool_choice_unsupported": True,
+        },
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
@@ -1243,6 +1269,21 @@ class Pipe:
             # Opus 5 runs with thinking ON unless thinking:{"type":"disabled"}
             # is sent explicitly. Disabling is rejected at effort xhigh/max.
             "thinking_on_by_default": True,
+        },
+        "claude-sonnet-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            # Runs adaptive thinking unless told otherwise, but `disabled` is a 400.
+            # The lowest setting is `between_tools`: no other field allowed inside
+            # `thinking`, and only accepted at effort 'high' or below.
+            "thinking_on_by_default": True,
+            "thinking_off_type": "between_tools",
+            # Forced tool_choice (`any` / `tool`) is a 400.
+            "forced_tool_choice_unsupported": True,
+            # Server-side refusal fallback accepts only the 'default' form here.
+            "refusal_fallback_default_only": True,
         },
         "claude-sonnet-5": {
             "supports_dynamic_filtering": True,
@@ -1318,7 +1359,7 @@ class Pipe:
         )
         ENABLED_MODELS: str = Field(
             default="",
-            description="Comma-separated model ids to expose (e.g. 'claude-opus-4-8,claude-sonnet-5'). "
+            description="Comma-separated model ids to expose (e.g. 'claude-opus-5-5,claude-sonnet-5-5'). "
             "Bypasses /v1/models auto-discovery — required for endpoints without it (Azure, some proxies). "
             "Empty = auto-discover from the API.",
         )
@@ -1329,7 +1370,7 @@ class Pipe:
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5 / 4.8). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
@@ -1396,8 +1437,10 @@ class Pipe:
         MEMORY_REVIEW_MODEL: Literal[
             "claude-haiku-4-5",
             "claude-sonnet-5",
+            "claude-sonnet-5-5",
             "claude-opus-4-8",
             "claude-opus-5",
+            "claude-opus-5-5",
             "same as chat model",
         ] = Field(
             default="claude-haiku-4-5",
@@ -1640,7 +1683,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-fable-5", "claude-mythos-5"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5"] = Field(
             default="claude-opus-5",
             description="Advisor model ID.",
         )

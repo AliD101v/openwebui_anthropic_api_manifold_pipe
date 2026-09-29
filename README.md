@@ -6,12 +6,12 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.27`
+- **Current pipe version:** `0.9.28`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
 - **Model list and capabilities are fetched dynamically** from Anthropic's Models API (`max_input_tokens`, `max_tokens`, thinking/effort support, compaction support, etc.)
-- **Current Anthropic model docs focus on:** `Claude Opus 5`, `Claude Sonnet 5`, `Claude Fable 5`, `Claude Opus 4.8`, `Claude Haiku 4.5`
+- **Current Anthropic model docs focus on:** `Claude Opus 5.5`, `Claude Sonnet 5.5`, `Claude Opus 5`, `Claude Sonnet 5`, `Claude Fable 5`, `Claude Opus 4.8`, `Claude Haiku 4.5`
 
 This pipe targets the **Anthropic Messages API** directly through the official **Anthropic Python SDK** and keeps the OpenWebUI experience close to Anthropic-native behavior while still playing nicely with OpenWebUI models, tools, filters, files, notes, channels, and task generation.
 
@@ -61,7 +61,7 @@ For each Claude model in **Admin Settings → Models**:
 1. Attach the toggle filters you want available for that model
 2. Set **Function Calling** to **`Native`**
 3. Optionally attach the **Companion Filter** if you want OpenWebUI's built-in `web_search` / `code_interpreter` buttons to route to Anthropic-native tools
-4. If you plan to use **Skills** or **Files API** workflows heavily, prefer models with strong tool and code-exec support (today that usually means **Opus 5** or **Sonnet 5**)
+4. If you plan to use **Skills** or **Files API** workflows heavily, prefer models with strong tool and code-exec support (today that usually means **Opus 5.5** or **Sonnet 5.5**)
 
 ---
 
@@ -142,7 +142,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `ANTHROPIC_API_KEY` | `""` | Personal key override for the admin key |
-| `ENABLE_THINKING` | `false` | Enables extended thinking. On models with thinking on by default (Opus 5 / Sonnet 5) turning it **off** actively disables thinking |
+| `ENABLE_THINKING` | `false` | Enables extended thinking. On models with thinking on by default (Opus 5 / Sonnet 5 / Sonnet 5.5) turning it **off** actively disables thinking; Opus 5.5 always thinks, so the toggle cannot turn it off there |
 | `THINKING_BUDGET_TOKENS` | `8192` | Manual thinking budget for models that still use `budget_tokens` |
 | `THINKING_DISPLAY` | `omitted` | `summarized` streams summarized thinking, `omitted` hides it for faster time-to-first-text |
 | `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`) |
@@ -171,7 +171,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `TOOL_SEARCH_MAX_DESCRIPTION_LENGTH` | `100` | Tools with longer JSON definitions are deferred for lazy loading |
 | `TOOL_SEARCH_EXCLUDE_TOOLS` | Anthropic server tools + OpenWebUI built-ins + Open Terminal tools | Always keep these tools loaded |
 | `ENABLE_ADVISOR_TOOL` | `false` | Enables the Advisor tool (beta `advisor-tool-2026-03-01`). Executor model consults a stronger advisor mid-generation for strategic guidance. Billed at the advisor's rate. |
-| `ADVISOR_MODEL` | `claude-opus-5` | Advisor model: `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5`, `claude-mythos-5` (auto-adjusted if incompatible) |
+| `ADVISOR_MODEL` | `claude-opus-5` | Advisor model: `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5`, `claude-mythos-5` (auto-adjusted if incompatible) |
 | `ADVISOR_MAX_USES` | `0` | Max advisor calls per request (`0` = unlimited). Beyond this, further calls return `advisor_tool_result_error` with `max_uses_exceeded`. |
 | `ADVISOR_CACHING` | `off` | Ephemeral prompt caching for the advisor transcript: `off`, `5m`, or `1h` |
 
@@ -191,9 +191,11 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 ### Important behavior notes
 
-- The pipe automatically prefers **adaptive thinking** whenever the model advertises it (Opus 5, Sonnet 5, Opus 4.8/4.7/4.6, Sonnet 4.6).
+- The pipe automatically prefers **adaptive thinking** whenever the model advertises it (Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Opus 4.8/4.7/4.6, Sonnet 4.6).
 - Anthropic recommends **`effort`** as the main control for adaptive-thinking models. Effort levels are clamped per model from the Models API, so unsupported values (`xhigh`, `max`) degrade instead of erroring.
 - On **Opus 5 / Sonnet 5**, thinking is **on by default**. Switching `ENABLE_THINKING` off sends `thinking: {"type": "disabled"}` and clamps effort to `high`, because Opus 5 rejects disabled thinking at `xhigh`/`max`.
+- **Sonnet 5.5** rejects `disabled`, so switching `ENABLE_THINKING` off sends `thinking: {"type": "between_tools"}` (its lowest thinking setting) and clamps effort to `high`. **Opus 5.5** always thinks: `disabled` is a 400 at every effort level, so the toggle has no off state there — lower `EFFORT` instead. Its API default effort is `medium`, but the pipe always sends your `EFFORT` value.
+- **Opus 5.5 / Sonnet 5.5** reject forced tool use, so Web Search Enforcement and forced OpenWebUI `tool_choice` values are sent as `auto`: `web_search` stays available but the model is not forced to call it.
 - `THINKING_DISPLAY="omitted"` suppresses streamed `thinking_delta` events, matching Anthropic's streaming behavior.
 - `USE_FILES_API` **overrides** native PDF upload. If enabled, the pipe uploads files to Anthropic and injects `container_upload` blocks at the correct message positions.
 - Anthropic's **Files API** supports create-once / use-many flows, but remains **beta**.
@@ -229,6 +231,14 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.28`
+- Added **Claude Opus 5.5** (`claude-opus-5-5`): 1M context, 128k output, fast mode, compaction, dynamic filtering. Thinking is always on: `thinking: {"type": "disabled"}` is a 400 at every effort level, so the Thinking Toggle never sends it for this model and only decides whether an explicit adaptive `thinking` block (with `display`) is sent
+- Added **Claude Sonnet 5.5** (`claude-sonnet-5-5`): 1M context, 128k output, compaction, dynamic filtering. `thinking: {"type": "disabled"}` is a 400 here too, so turning the Thinking Toggle off now sends `thinking: {"type": "between_tools"}` (the lowest thinking setting). Like disabled on Opus 5 it is only accepted up to effort `high`, so `xhigh`/`max` are clamped to `high`
+- Forced `tool_choice` (`any` / `tool`) is a 400 on both 5.5 models: Web Search Enforcement and OpenWebUI's `required` / function `tool_choice` now go out as `auto`. `web_search` is still offered, the model just isn't forced to call it
+- `REFUSAL_FALLBACK` on Sonnet 5.5 always uses Anthropic's per-category `default` routing, even when a pinned fallback model is selected: only the `default` form is accepted for that model
+- Advisor: Opus 5.5 is now a selectable advisor and both 5.5 models have executor/advisor pairings. Sonnet 5.5 rejects Opus 4.8 / 4.7 / 4.6 and Sonnet 5 advisors (400), so the advisor is upgraded to Opus 5.5 for that executor
+- The memory-review model list knows about Opus 5.5 and Sonnet 5.5
+
 ### `v0.9.27`
 - Fixed a follow-up request failing with `tool use found without a corresponding tool_result block` after a turn with several Anthropic-hosted code-execution calls. The stored carriers interleave once server tools run in quick succession, and replaying them in document order separated a `server_tool_use` from its result. Results are now pulled forward so the pair stays adjacent (#40, by @JaWoDigiB)
 - Fixed error notices and the File Content collapsible being swallowed into the preceding paragraph: code-execution / text-editor errors and safety refusals now go through the same own-line guarantee as every other rendered block (#46, by @Willian-Zhang)

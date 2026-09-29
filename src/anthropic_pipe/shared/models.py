@@ -40,6 +40,10 @@ class PipeModelSupportMethods:
             "supports_dynamic_filtering": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
+            "thinking_can_disable": True,
+            "thinking_off_type": "disabled",
+            "forced_tool_choice_unsupported": False,
+            "refusal_fallback_default_only": False,
         }
 
         # Apply model-specific overrides for fields not available from API
@@ -85,6 +89,10 @@ class PipeModelSupportMethods:
             "supports_effort_xhigh": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
+            "thinking_can_disable": True,
+            "thinking_off_type": "disabled",
+            "forced_tool_choice_unsupported": False,
+            "refusal_fallback_default_only": False,
         }
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_name)
         if overrides is None:

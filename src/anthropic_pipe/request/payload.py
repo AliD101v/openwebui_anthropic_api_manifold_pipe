@@ -82,7 +82,7 @@ async def create_request_payload(
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
-    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5)
+    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5 / Opus 5.5)
     if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
         payload["speed"] = "fast"
         logger.debug("Fast Mode enabled for this request")
@@ -153,19 +153,31 @@ async def create_request_payload(
 
         payload["thinking"] = thinking_config
     elif model_info.get("thinking_on_by_default"):
-        # Opus 5 / Sonnet 5 think unless told otherwise, so simply omitting the
-        # `thinking` field no longer honours the toggle — send the explicit
-        # disable. Opus 5 rejects `thinking:{"type":"disabled"}` at effort
-        # xhigh/max with a 400, so the toggle also caps effort at high.
-        payload["thinking"] = {"type": "disabled"}
-        if effective_effort in ("xhigh", "max"):
-            logger.info(
-                f"Thinking disabled on {actual_model_name}: effort "
-                f"'{effective_effort}' is incompatible with thinking:disabled, "
-                "clamping to 'high'"
+        if not model_info.get("thinking_can_disable", True):
+            # Opus 5.5: thinking is always on. `thinking:{"type":"disabled"}` is a
+            # 400 at every effort level, so the toggle cannot be honoured — omit
+            # the field and let it run adaptively.
+            logger.debug(
+                f"{actual_model_name} cannot run without thinking; "
+                "Thinking Toggle is off, leaving `thinking` unset (adaptive)."
             )
-            effective_effort = "high"
-            effort_config = {"effort": "high"}
+        else:
+            # Opus 5 / Sonnet 5 / Sonnet 5.5 think unless told otherwise, so simply
+            # omitting the `thinking` field no longer honours the toggle — send the
+            # explicit "off" value (`disabled`; Sonnet 5.5 rejects that and wants
+            # `between_tools`). Opus 5 rejects `thinking:{"type":"disabled"}` at
+            # effort xhigh/max with a 400, and Sonnet 5.5 does the same for
+            # `between_tools`, so the toggle also caps effort at high.
+            _thinking_off = model_info.get("thinking_off_type", "disabled")
+            payload["thinking"] = {"type": _thinking_off}
+            if effective_effort in ("xhigh", "max"):
+                logger.info(
+                    f"Thinking disabled on {actual_model_name}: effort "
+                    f"'{effective_effort}' is incompatible with "
+                    f"thinking:{_thinking_off}, clamping to 'high'"
+                )
+                effective_effort = "high"
+                effort_config = {"effort": "high"}
 
     raw_messages = body.get("messages", []) or []
 
@@ -593,9 +605,15 @@ async def create_request_payload(
         # `fallbacks` is not a named SDK parameter yet, so pass it through
         # extra_body (same route as `diagnostics`) instead of as a kwarg the
         # installed SDK version may reject.
-        _fallbacks = (
-            "default" if fallback_mode == "default" else [{"model": fallback_mode}]
-        )
+        _pin_fallback = fallback_mode != "default"
+        if _pin_fallback and model_info.get("refusal_fallback_default_only"):
+            # Sonnet 5.5 accepts only fallbacks:"default", not a pinned model.
+            logger.debug(
+                f"{actual_model_name} supports only the 'default' refusal fallback; "
+                f"ignoring pinned '{fallback_mode}'"
+            )
+            _pin_fallback = False
+        _fallbacks = [{"model": fallback_mode}] if _pin_fallback else "default"
         payload.setdefault("extra_body", {})["fallbacks"] = _fallbacks
         logger.debug(f"Server-side refusal fallback: {_fallbacks}")
 
@@ -689,6 +707,21 @@ async def create_request_payload(
             # Already in Anthropic format or other dict format
             payload["tool_choice"] = api_tc
         logger.debug(f"API tool_choice passthrough: {payload['tool_choice']}")
+
+    # Opus 5.5 / Sonnet 5.5 reject forced tool use — `any` and `tool` return a 400.
+    # Covers both web_search enforcement and the OpenWebUI passthrough above; tools
+    # stay available under `auto`, the model just isn't forced to call one.
+    _final_tool_choice = payload.get("tool_choice")
+    if (
+        model_info.get("forced_tool_choice_unsupported")
+        and isinstance(_final_tool_choice, dict)
+        and _final_tool_choice.get("type") in ("any", "tool")
+    ):
+        logger.debug(
+            f"{actual_model_name} rejects forced tool_choice "
+            f"({_final_tool_choice}); downgrading to auto"
+        )
+        payload["tool_choice"] = {"type": "auto"}
 
     # Filter stale tool_search references for tools toggled OFF.
     # History `tool_search_tool_result` blocks list `tool_references` for tools
