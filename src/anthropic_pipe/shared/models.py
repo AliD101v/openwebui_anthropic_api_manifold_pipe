@@ -18,6 +18,7 @@ class PipeModelSupportMethods:
         thinking_types = getattr(thinking, "types", None) if thinking else None
         effort = getattr(caps, "effort", None) if caps else None
         ctx_mgmt = getattr(caps, "context_management", None) if caps else None
+        server_tools = getattr(caps, "server_tools", None) if caps else None
 
         max_tokens = getattr(model, "max_tokens", 0) or 0
         max_input = getattr(model, "max_input_tokens", 0) or 0
@@ -34,17 +35,30 @@ class PipeModelSupportMethods:
             "supports_programmatic_calling": _sup(getattr(caps, "code_execution", None)) if caps else False,
             "supports_compaction": _sup(getattr(ctx_mgmt, "compact_20260112", None)) if ctx_mgmt else False,
             "supports_structured_outputs": _sup(getattr(caps, "structured_outputs", None)) if caps else False,
+            # Server tools default to available: endpoints that predate the
+            # field (proxies, older API versions) keep sending the tools.
+            "supports_web_search_tool": _sup(getattr(server_tools, "web_search", None)) if server_tools else True,
+            "supports_code_execution_tool": _sup(getattr(server_tools, "code_execution", None)) if server_tools else True,
             # All Claude 4+ models support memory
             "supports_memory": True,
             # Defaults for fields not in API — overridden by MODEL_CAPABILITY_OVERRIDES
             "supports_dynamic_filtering": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
-            "thinking_can_disable": True,
-            "thinking_off_type": "disabled",
-            "forced_tool_choice_unsupported": False,
-            "refusal_fallback_default_only": False,
+            # tool_choice "tool"/"any"; pinned False by identity where the API 400s
+            "supports_forced_tool_choice": True,
+            # server-side refusal fallback; pinned False by identity (Haiku 5.5)
+            "supports_refusal_fallback": True,
         }
+        # How a thinking-on-by-default model turns thinking off: "disabled"
+        # where the API accepts it, else "between_tools" (no up-front
+        # thinking). Only read when thinking_on_by_default is pinned below.
+        if (
+            thinking_types
+            and _sup(getattr(thinking_types, "between_tools", None))
+            and not _sup(getattr(thinking_types, "disabled", None))
+        ):
+            info["thinking_off_type"] = "between_tools"
 
         # Apply model-specific overrides for fields not available from API
         model_id = model.id if hasattr(model, "id") else ""
@@ -52,6 +66,19 @@ class PipeModelSupportMethods:
         info.update(overrides)
 
         return info
+
+    @staticmethod
+    def _normalize_model_name(model_name: str) -> str:
+        """
+        Strip a trailing -YYYYMMDD date suffix from a model id.
+
+        Endpoints that don't serve dated aliases (Azure/custom proxies) may hand
+        us a dated id like "claude-opus-4-6-20251022". This is the single source
+        of truth for that normalization; both capability lookups and any literal
+        model-id comparisons must go through it so dated and undated ids behave
+        identically.
+        """
+        return re.sub(r"-\d{8}$", "", model_name)
 
     @classmethod
     def get_model_info(cls, model_name: str) -> dict:
@@ -65,15 +92,21 @@ class PipeModelSupportMethods:
         # Endpoints that don't serve dated aliases (Azure/custom proxies) may hand
         # us a dated id like "claude-opus-4-6-20251022". Strip the -YYYYMMDD suffix
         # and retry both the API cache and the capability overrides with the base id.
-        normalized = re.sub(r"-\d{8}$", "", model_name)
+        normalized = cls._normalize_model_name(model_name)
         if normalized != model_name and normalized in cls._api_capabilities_cache:
             return cls._api_capabilities_cache[normalized]
 
         # Return conservative defaults for unknown models, then apply identity
         # overrides for beta features whose API capability metadata can lag.
         info = {
+            # 64000 rather than a timid 4096: every current Claude sustains at
+            # least that much output (Haiku 4.5 and Opus 4.5 are the floor), and
+            # proxies that rename models — litellm/Bedrock ids like
+            # "us.anthropic.claude-sonnet-5-v1:0" — miss the table above and land
+            # here. A too-small ceiling truncates answers with stop_reason
+            # "max_tokens", which reads like a context problem and is not one.
             "max_tokens": cls.MODEL_MAX_TOKENS_FALLBACK.get(model_name)
-            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 4096),
+            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 64000),
             "context_length": cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(model_name)
             or cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(normalized, 200000),
             "supports_thinking": True,
@@ -89,16 +122,18 @@ class PipeModelSupportMethods:
             "supports_effort_xhigh": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
-            "thinking_can_disable": True,
-            "thinking_off_type": "disabled",
-            "forced_tool_choice_unsupported": False,
-            "refusal_fallback_default_only": False,
+            "supports_forced_tool_choice": True,
+            "supports_refusal_fallback": True,
         }
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_name)
         if overrides is None:
             overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(normalized, {})
         info.update(overrides)
         return info
+
+    def _model_pricing(self) -> "ModelPricing":
+        """Rate card for this pipe, with the admin's MODEL_PRICING_OVERRIDES applied."""
+        return ModelPricing(getattr(self.valves, "MODEL_PRICING_OVERRIDES", "") or "")
 
     def _model_cache_signature(self) -> str:
         """Fingerprint of the settings the model list depends on.
@@ -251,14 +286,18 @@ class PipeModelSupportMethods:
         # create_request_payload. Plaintext keys pass through untouched.
         api_key = decrypt_valve_secret(api_key)
         base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-        # The SDK derives its own "X-Api-Key" from api_key and merges default_headers
-        # with a case-sensitive dict merge, so a lowercase "x-api-key" here survives
-        # alongside it and httpx emits the header twice -> 401 "API key is invalid.".
+        # SDK 2.x sends api_key as "Authorization: Bearer" only. Proxies and
+        # gateways behind a custom ANTHROPIC_BASE_URL often still read
+        # "x-api-key", so those endpoints get the key in both headers (the Claude
+        # API accepts the pair, verified 2026-10-23). A caller's own x-api-key
+        # entry may still be encrypted, hence dropped in favour of api_key.
         headers = {
             k: v
             for k, v in (default_headers or {}).items()
             if k.lower() != "x-api-key"
         }
+        if base_url and base_url.rstrip("/") != self._DEFAULT_API_BASE:
+            headers["x-api-key"] = api_key
         ws_id = (getattr(self.valves, "ANTHROPIC_WORKSPACE_ID", "") or "").strip()
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)

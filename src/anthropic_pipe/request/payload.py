@@ -24,34 +24,7 @@ async def create_request_payload(
 ) -> tuple[dict, dict, List[str], List[str]]:
     """Build the Anthropic API request payload, headers, and marker/tool metadata for one turn."""
 
-    status_cls = globals().get("StatusEmitter")
-    if status_cls:
-        status = status_cls(__event_emitter__)
-    else:
-        class _PayloadStatus:
-            def __init__(self, emit_event):
-                """Store the OpenWebUI event emitter callback."""
-                self._emit_event = emit_event
-
-            async def activity(self, description: str) -> None:
-                """Emit an in-progress status event."""
-                await self._emit_event(
-                    {"type": "status", "data": {"description": description, "done": False}}
-                )
-
-            async def complete(self, description: str) -> None:
-                """Emit a completed status event."""
-                await self._emit_event(
-                    {"type": "status", "data": {"description": description, "done": True}}
-                )
-
-            async def notification(self, content: str, *, type: str = "warning") -> None:
-                """Emit a notification event."""
-                await self._emit_event(
-                    {"type": "notification", "data": {"type": type, "content": content}}
-                )
-
-        status = _PayloadStatus(__event_emitter__)
+    status = StatusEmitter(__event_emitter__)
 
     ## General payload creation
     actual_model_name = body["model"].split("/")[-1]
@@ -65,25 +38,23 @@ async def create_request_payload(
         "stream": body.get("stream", True),
         "metadata": body.get("metadata", {}),
     }
-    # Opus 4.7 / 4.8 and the 4.6+ adaptive-thinking family reject sampling params
-    # (temperature / top_p / top_k) — API returns 400. Strip them there.
-    # Heuristic: models that support adaptive thinking (Opus 4.6, Sonnet 4.6,
-    # Opus 4.7, Opus 4.8) do not accept these fields when adaptive is enabled.
-    # On Opus 4.7 / 4.8 they are rejected unconditionally. Safe to skip for the set.
-    _strip_sampling = bool(model_info.get("supports_adaptive_thinking"))
-    if not _strip_sampling and body.get("temperature") is not None:
-        payload["temperature"] = float(body.get("temperature", 0))
-    if not _strip_sampling and body.get("top_k") is not None:
-        payload["top_k"] = float(body.get("top_k", 0))
-    if not _strip_sampling and body.get("top_p") is not None:
-        payload["top_p"] = float(body.get("top_p", 0))
+    # temperature / top_p / top_k from OpenWebUI's model params are dropped on
+    # purpose: API version 2026-10-21 answers them with a 400 on every model,
+    # and anthropic SDK 2.x no longer accepts them as arguments.
 
     # Add data residency if set to US (1.1x token cost)
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
-    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5 / Opus 5.5)
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5).
+    # Two ways in: the admin valve turns it on for every request, the toggle
+    # filter turns it on for a single message. Fast mode is a per-request
+    # trade (latency against depth), so the per-message switch is the one
+    # people actually want -- OR them rather than letting the valve win.
+    fast_requested = pipe.valves.ENABLE_FAST_MODE or (__metadata__ or {}).get(
+        "anthropic_fast", False
+    )
+    if fast_requested and model_info.get("supports_fast_mode", False):
         payload["speed"] = "fast"
         logger.debug("Fast Mode enabled for this request")
         
@@ -117,6 +88,17 @@ async def create_request_payload(
     enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
         "anthropic_thinking", False
     )
+    if not enable_thinking and model_info.get("thinking_always_on"):
+        # Opus 5.5 400s on thinking:{"type":"disabled"}; effort is the only
+        # knob, so "thinking off" becomes the cheapest effort instead.
+        if effort_config is not None:
+            logger.debug(
+                f"Thinking can't be disabled on {actual_model_name}: "
+                f"effort '{effective_effort}' -> 'low'"
+            )
+            effective_effort = "low"
+            effort_config = {"effort": "low"}
+        enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
         # Opus 4.6 (supports adaptive thinking) uses effort as the control
         if model_info["supports_adaptive_thinking"]:
@@ -148,36 +130,33 @@ async def create_request_payload(
             )
 
         thinking_display = __user__["valves"].THINKING_DISPLAY
-        if thinking_display in ("omitted", "summarized"):
+        if thinking_display in ("omitted", "summarized", "updates"):
             thinking_config["display"] = thinking_display
+
+        # Replayed thinking blocks are bound to the request prefix (system,
+        # tools, earlier messages) on Fable 5.1 / Opus 5.5. block_binding is
+        # deliberately NOT sent here: on accounts created before 2026-08-31 it
+        # opts the request in to the check, and blocks the model could still
+        # read get dropped (live-verified 2026-09-22). Newer accounts get a 400
+        # instead, which the orchestrator retries once with drop_block.
 
         payload["thinking"] = thinking_config
     elif model_info.get("thinking_on_by_default"):
-        if not model_info.get("thinking_can_disable", True):
-            # Opus 5.5: thinking is always on. `thinking:{"type":"disabled"}` is a
-            # 400 at every effort level, so the toggle cannot be honoured — omit
-            # the field and let it run adaptively.
-            logger.debug(
-                f"{actual_model_name} cannot run without thinking; "
-                "Thinking Toggle is off, leaving `thinking` unset (adaptive)."
+        # Opus 5 / Sonnet 5 think unless told otherwise, so simply omitting the
+        # `thinking` field no longer honours the toggle — send the explicit
+        # disable. Sonnet 5.5 400s on "disabled"; its lowest setting is
+        # "between_tools". Both are rejected at effort xhigh/max with a 400, so
+        # the toggle also caps effort at high.
+        off_type = model_info.get("thinking_off_type", "disabled")
+        payload["thinking"] = {"type": off_type}
+        if effective_effort in ("xhigh", "max"):
+            logger.info(
+                f"Thinking off on {actual_model_name}: effort "
+                f"'{effective_effort}' is incompatible with thinking:{off_type}, "
+                "clamping to 'high'"
             )
-        else:
-            # Opus 5 / Sonnet 5 / Sonnet 5.5 think unless told otherwise, so simply
-            # omitting the `thinking` field no longer honours the toggle — send the
-            # explicit "off" value (`disabled`; Sonnet 5.5 rejects that and wants
-            # `between_tools`). Opus 5 rejects `thinking:{"type":"disabled"}` at
-            # effort xhigh/max with a 400, and Sonnet 5.5 does the same for
-            # `between_tools`, so the toggle also caps effort at high.
-            _thinking_off = model_info.get("thinking_off_type", "disabled")
-            payload["thinking"] = {"type": _thinking_off}
-            if effective_effort in ("xhigh", "max"):
-                logger.info(
-                    f"Thinking disabled on {actual_model_name}: effort "
-                    f"'{effective_effort}' is incompatible with "
-                    f"thinking:{_thinking_off}, clamping to 'high'"
-                )
-                effective_effort = "high"
-                effort_config = {"effort": "high"}
+            effective_effort = "high"
+            effort_config = {"effort": "high"}
 
     raw_messages = body.get("messages", []) or []
 
@@ -402,7 +381,9 @@ async def create_request_payload(
         and model_info.get("supports_programmatic_calling", False)
     )
 
-    if activate_code_execution and not has_code_execution and not has_native_terminal_tools:
+    if activate_code_execution and not model_info.get("supports_code_execution_tool", True):
+        logger.warning(f"Code execution skipped: /v1/models reports no code execution tool for {actual_model_name}")
+    elif activate_code_execution and not has_code_execution and not has_native_terminal_tools:
         if use_programmatic_code_exec:
             # Always add code_execution_20260120 for programmatic calling,
             # even alongside dynamic filtering tools (it supersedes the auto-injected one)
@@ -437,36 +418,14 @@ async def create_request_payload(
 
     beta_headers: list[str] = []
 
-    # Enable prompt caching if not disabled
-    if pipe.valves.CACHE_CONTROL != "cache disabled":
-        beta_headers.append("prompt-caching-2024-07-31")
-
-    # Add code-execution beta header ONLY when we explicitly added code_execution to tools.
-    # Do NOT add when using dynamic filtering v20260209 web tools — those auto-inject
-    # code_execution internally and the beta header would cause a second injection → duplicate error.
-    if has_code_execution:
-        # code_execution_20260120 doesn't need the old beta header
-        code_exec_is_new = any(
-            t.get("type") == "code_execution_20260120" for t in tools_list
-        )
-        if not code_exec_is_new:
-            beta_headers.append("code-execution-2025-08-25")
-        if activate_code_execution:
-            beta_headers.append("files-api-2025-04-14")
+    if has_code_execution and activate_code_execution:
+        beta_headers.append("files-api-2025-04-14")
     if (
         pipe.valves.ENABLE_INTERLEAVED_THINKING
         and model_info["supports_thinking"]
         and not model_info["supports_adaptive_thinking"]
     ):
         beta_headers.append("interleaved-thinking-2025-05-14")
-
-    # Add web_fetch beta header when using the older version (20250910)
-    # The newer 20260209 version doesn't need a beta header
-    uses_old_web_fetch = any(
-        t.get("type") == "web_fetch_20250910" for t in tools_list
-    )
-    if pipe.valves.WEB_FETCH and uses_old_web_fetch:
-        beta_headers.append("web-fetch-2025-09-10")
 
     # Add Files API beta header when files were uploaded but code_execution
     # wasn't otherwise activated (standalone file upload scenario)
@@ -502,73 +461,28 @@ async def create_request_payload(
         payload["container"] = previous_container_id
         logger.info(f"📦 Reusing container from previous turn: {previous_container_id}")
 
-    # Add advanced tool use beta (for programmatic calling and tool search)
-    if __user__["valves"].ENABLE_TOOL_SEARCH or pipe.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
-        beta_headers.append("advanced-tool-use-2025-11-20")
-
     # Add advisor tool beta
     if __user__["valves"].ENABLE_ADVISOR_TOOL:
         beta_headers.append("advisor-tool-2026-03-01")
 
-    # Add context editing strategies if enabled
-    context_editing_strategy = __user__["valves"].CONTEXT_EDITING_STRATEGY
-    if context_editing_strategy != "none":
-        if "context-management-2025-06-27" not in beta_headers:
-            beta_headers.append("context-management-2025-06-27")
-
-        # Build context_management array for payload
-        # IMPORTANT: clear_thinking must be FIRST if present (API requirement)
-        context_management = []
-
-        # Add clear_thinking FIRST if needed
-        if (
-            context_editing_strategy in ["clear_thinking", "clear_both"]
-            and enable_thinking
-            and model_info["supports_thinking"]
-        ):
-            _keep_val = __user__["valves"].CONTEXT_EDITING_THINKING_KEEP
-            clear_thinking = {
-                "type": "clear_thinking_20251015",
-                # keep=0 → "all" (preserve all thinking → stable prompt cache).
-                # keep>0 → sliding window (breaks cache every turn past threshold).
-                "keep": "all" if _keep_val <= 0 else {
-                    "type": "thinking_turns",
-                    "value": _keep_val,
-                },
-            }
-            context_management.append(clear_thinking)
-
-        # Add clear_tool_uses SECOND
-        if (
-            context_editing_strategy in ["clear_tool_results", "clear_both"]
-            and len(tools_list) > 2
-        ):
-            clear_tool_uses = {
-                "type": "clear_tool_uses_20250919",
-                "trigger": {
-                    "type": "input_tokens",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_TRIGGER,
-                },
-                "keep": {
-                    "type": "tool_uses",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_KEEP,
-                },
-            }
-            if __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST > 0:
-                clear_tool_uses["clear_at_least"] = {
-                    "type": "input_tokens",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST,
-                }
-            if __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_TOOL_INPUT:
-                clear_tool_uses["clear_tool_inputs"] = True
-            context_management.append(clear_tool_uses)
-
-        if context_management:
-            payload["context_management"] = {"edits": context_management}
+    # OpenWebUI's own Context Compaction (admin setting, runs before any filter
+    # or pipe) has already summarized this chat when its marker sits in the
+    # system prompt. Two summarizers on one conversation is waste: OpenWebUI
+    # wins for that request and the API-side compaction stays off.
+    owui_compacted = any(
+        isinstance(_b, dict) and "[CONVERSATION SUMMARY]" in str(_b.get("text", ""))
+        for _b in (system_messages or [])
+    )
+    if owui_compacted and __user__["valves"].ENABLE_COMPACTION:
+        logger.info("OpenWebUI context compaction detected - skipping API-side compaction for this request")
 
     # Add compaction if enabled and model supports it. New beta support may need
     # MODEL_CAPABILITY_OVERRIDES because API capability metadata can lag.
-    if __user__["valves"].ENABLE_COMPACTION and model_info.get("supports_compaction", False):
+    if (
+        __user__["valves"].ENABLE_COMPACTION
+        and not owui_compacted
+        and model_info.get("supports_compaction", False)
+    ):
         if "context-management-2025-06-27" not in beta_headers:
             beta_headers.append("context-management-2025-06-27")
         beta_headers.append("compact-2026-01-12")
@@ -587,33 +501,36 @@ async def create_request_payload(
             payload["context_management"] = {"edits": []}
         payload["context_management"]["edits"].append(compact_edit)
 
-    # Add effort beta header and output_config if effort is configured
     if model_info["supports_effort"] and effort_config:
-        beta_headers.append("effort-2025-11-24")
         payload["output_config"] = effort_config
 
-    # Add Fast Mode beta header if enabled and model supports it
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    # Add Fast Mode beta header whenever the request actually asks for fast
+    # speed. Bind to payload["speed"] -- set above from the valve OR the
+    # per-message toggle and already gated on supports_fast_mode -- so the
+    # opt-in header follows the toggle, not just the admin valve. Only the
+    # research-preview models (Opus 5, Opus 4.8) need it; Opus 5.5 is GA.
+    if payload.get("speed") == "fast" and model_info.get("fast_mode_beta"):
         beta_headers.append("fast-mode-2026-02-01")
+
+    if (payload.get("thinking") or {}).get("display") == "updates":
+        beta_headers.append("thinking-display-updates-2026-08-18")
 
     # Server-side fallback on safety refusals. Claude API only — not supported on
     # Bedrock / Vertex / Foundry or the Batches API, so it stays off whenever the
-    # base URL is not Anthropic's.
+    # base URL is not Anthropic's, and for models without fallback (Haiku 5.5).
     fallback_mode = getattr(pipe.valves, "REFUSAL_FALLBACK", "off")
-    if fallback_mode != "off" and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE:
+    if (
+        fallback_mode != "off"
+        and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE
+        and model_info.get("supports_refusal_fallback", True)
+    ):
         beta_headers.append("server-side-fallback-2026-07-01")
         # `fallbacks` is not a named SDK parameter yet, so pass it through
         # extra_body (same route as `diagnostics`) instead of as a kwarg the
         # installed SDK version may reject.
-        _pin_fallback = fallback_mode != "default"
-        if _pin_fallback and model_info.get("refusal_fallback_default_only"):
-            # Sonnet 5.5 accepts only fallbacks:"default", not a pinned model.
-            logger.debug(
-                f"{actual_model_name} supports only the 'default' refusal fallback; "
-                f"ignoring pinned '{fallback_mode}'"
-            )
-            _pin_fallback = False
-        _fallbacks = [{"model": fallback_mode}] if _pin_fallback else "default"
+        _fallbacks = (
+            "default" if fallback_mode == "default" else [{"model": fallback_mode}]
+        )
         payload.setdefault("extra_body", {})["fallbacks"] = _fallbacks
         logger.debug(f"Server-side refusal fallback: {_fallbacks}")
 
@@ -670,26 +587,31 @@ async def create_request_payload(
         # Add betas list to payload for beta.messages.stream
         payload["betas"] = beta_headers
 
-        ## Tool Choice Handling
-        if __metadata__.get("web_search_enforced"):
-            # Check if web_search is actually in the tools list
-            has_web_search = any(t.get("name") == "web_search" for t in tools_list)
-            if has_web_search:
-                if "thinking" not in payload:
-                    # No thinking active - enforce web_search
-                    payload["tool_choice"] = {"type": "tool", "name": "web_search"}
-                    logger.debug("Enforcing web_search via tool_choice")
-                else:
-                    # Thinking is active - cannot enforce web_search, but it's still available
-                    payload["tool_choice"] = {"type": "auto"}
-                    logger.debug(
-                        "Thinking active - web_search added but not enforced (tool_choice=auto)"
-                    )
-            else:
-                # No enforcement - use auto tool choice
+    ## Tool Choice Handling
+    if __metadata__.get("web_search_enforced"):
+        # Check if web_search is actually in the tools list
+        has_web_search = any(t.get("name") == "web_search" for t in tools_list)
+        if has_web_search:
+            if "thinking" not in payload and not model_info.get("supports_forced_tool_choice", True):
                 payload["tool_choice"] = {"type": "auto"}
+                logger.info(
+                    f"{actual_model_name} rejects forced tool_choice - web_search added but not enforced (tool_choice=auto)"
+                )
+            elif "thinking" not in payload:
+                # No thinking active - enforce web_search
+                payload["tool_choice"] = {"type": "tool", "name": "web_search"}
+                logger.debug("Enforcing web_search via tool_choice")
+            else:
+                # Thinking is active - cannot enforce web_search, but it's still available
+                payload["tool_choice"] = {"type": "auto"}
+                logger.debug(
+                    "Thinking active - web_search added but not enforced (tool_choice=auto)"
+                )
+        else:
+            # No enforcement - use auto tool choice
+            payload["tool_choice"] = {"type": "auto"}
 
-    # API tool_choice passthrough (outside beta_headers block)
+    # API tool_choice passthrough
     # If no tool_choice was set by web_search enforcement, pass through from body
     if "tool_choice" not in payload and body.get("tool_choice"):
         api_tc = body["tool_choice"]
@@ -706,22 +628,16 @@ async def create_request_payload(
         else:
             # Already in Anthropic format or other dict format
             payload["tool_choice"] = api_tc
+        if (
+            isinstance(payload["tool_choice"], dict)
+            and payload["tool_choice"].get("type") in ("tool", "any")
+            and not model_info.get("supports_forced_tool_choice", True)
+        ):
+            logger.info(
+                f"{actual_model_name} rejects tool_choice {payload['tool_choice']} - degrading to auto"
+            )
+            payload["tool_choice"] = {"type": "auto"}
         logger.debug(f"API tool_choice passthrough: {payload['tool_choice']}")
-
-    # Opus 5.5 / Sonnet 5.5 reject forced tool use — `any` and `tool` return a 400.
-    # Covers both web_search enforcement and the OpenWebUI passthrough above; tools
-    # stay available under `auto`, the model just isn't forced to call one.
-    _final_tool_choice = payload.get("tool_choice")
-    if (
-        model_info.get("forced_tool_choice_unsupported")
-        and isinstance(_final_tool_choice, dict)
-        and _final_tool_choice.get("type") in ("any", "tool")
-    ):
-        logger.debug(
-            f"{actual_model_name} rejects forced tool_choice "
-            f"({_final_tool_choice}); downgrading to auto"
-        )
-        payload["tool_choice"] = {"type": "auto"}
 
     # Filter stale tool_search references for tools toggled OFF.
     # History `tool_search_tool_result` blocks list `tool_references` for tools
@@ -787,15 +703,24 @@ async def create_request_payload(
 
     # Tool search nudge: deferred tools are stripped from the prompt prefix, so the
     # model can't see them and tends to claim it lacks the capability. Tell it to
-    # search first. Static text → does not churn the cache across turns.
-    if any(isinstance(_t, dict) and _t.get("defer_loading") for _t in tools_list):
+    # search first. The deferred names are listed (Anthropic's tool search tips:
+    # name what can be searched for); without them the model picked web_search over
+    # a deferred get_weather the user asked for. Sorted, and a function of the tool
+    # set only, so it changes exactly when the tools array does -- no extra churn.
+    _deferred_names = sorted(
+        _t["name"] for _t in tools_list
+        if isinstance(_t, dict) and _t.get("defer_loading") and _t.get("name")
+    )
+    if _deferred_names:
         _tool_search_nudge = {
             "type": "text",
             "text": (
                 "Some available tools are not listed directly in this request; they are "
                 "loaded on demand via the tool search tool (tool_search_tool_*). Before "
                 "telling the user you cannot do something or that you lack access to a tool, "
-                "call the tool search tool to find a relevant tool, then use whatever it returns."
+                "call the tool search tool to find a relevant tool, then use whatever it returns. "
+                "Prefer a matching tool from this list over web search: "
+                + ", ".join(_deferred_names)
             ),
         }
         if isinstance(system_messages, list):
@@ -804,6 +729,25 @@ async def create_request_payload(
             system_messages = [{"type": "text", "text": str(system_messages)}, _tool_search_nudge]
         else:
             system_messages = [_tool_search_nudge]
+
+    # Open Terminal + Anthropic's code execution sandbox in one request: asked to
+    # "run X in the terminal", the model used the sandbox (bash_code_execution),
+    # which cannot see the user's machine. Static text, only in that combination.
+    _tool_names = {_t.get("name") for _t in tools_list if isinstance(_t, dict)}
+    if (__metadata__ or {}).get("terminal_id") and "code_execution" in _tool_names:
+        _terminal_hint = {
+            "type": "text",
+            "text": (
+                "The user's terminal is reached only through the terminal tools "
+                f"({', '.join(sorted(_tool_names & {'bash', 'run_command', 'str_replace_based_edit_tool', 'write_file', 'read_file'})) or 'run_command'}). "
+                "code_execution is a separate, isolated sandbox without access to the user's "
+                "terminal or files; use it only for calculations or analysis, never when the "
+                "user refers to their terminal, machine or files there."
+            ),
+        }
+        system_messages = (system_messages if isinstance(system_messages, list)
+                           else ([{"type": "text", "text": str(system_messages)}] if system_messages else []))
+        system_messages = system_messages + [_terminal_hint]
 
     # Processing Messages and Caching
     if system_messages and len(system_messages) > 0:

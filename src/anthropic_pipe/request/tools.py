@@ -45,6 +45,24 @@ class PipeRequestToolsMethods:
         # Names reserved for Anthropic server-side tools (skip if found in body.tools)
         anthropic_server_tool_names = {"web_search", "web_fetch"}
 
+        # OpenWebUI >= 0.12 Tool Search: OWUI holds large tools back from
+        # body.tools, adds its own `search_tools` + `call_tool` and lists the
+        # held-back names in a system-prompt manifest. With Claude's native tool
+        # search on, the held-back tools are sent with `defer_loading` instead and
+        # OWUI's two tools are dropped (the manifest is stripped in pipe()). With
+        # it off, OWUI's mechanism runs as is: the held-back tools stay out and
+        # `call_tool` is resolved in response/client_tool.py.
+        native_tool_search = self._native_tool_search_active(actual_model_name, __user__)
+        owui_deferred = set((__metadata__ or {}).get("deferred_tools") or [])
+        owui_held_back: set[str] = set()
+        if owui_deferred and native_tool_search:
+            anthropic_server_tool_names = anthropic_server_tool_names | {
+                OWUI_SEARCH_TOOL_NAME,
+                OWUI_CALL_TOOL_NAME,
+            }
+        elif owui_deferred:
+            owui_held_back = owui_deferred
+
         # Open Terminal bridge activation: if native bash / text_editor tools
         # are enabled AND the required Open Terminal callables are present,
         # route Claude's native tool calls through them and hide the raw
@@ -96,7 +114,9 @@ class PipeRequestToolsMethods:
                 if tool_entry.get("type") == "function":
                     func = tool_entry.get("function", {})
                     name = func.get("name")
-                    if not name or name in tool_names_seen:
+                    # Private helpers (`_get_client`, ...) can sit in a tool's
+                    # stored specs; they are not callable tools.
+                    if not name or name in tool_names_seen or name.startswith("_"):
                         continue
 
                     # Skip tools that will be handled by Anthropic server-side tools
@@ -120,8 +140,11 @@ class PipeRequestToolsMethods:
                     }
                     body_user_tools.append(claude_tool)
                     tool_names_seen.add(name)
-                    # Track as API-provided tool (no callable — for passthrough)
-                    if not (__tools__ and name in __tools__ and __tools__[name].get("callable")):
+                    # Track as API-provided tool (no callable — for passthrough).
+                    # OWUI's `call_tool` has no callable either but is resolved here.
+                    if name != OWUI_CALL_TOOL_NAME and not (
+                        __tools__ and name in __tools__ and __tools__[name].get("callable")
+                    ):
                         api_tool_names.add(name)
 
             claude_tools.extend(sorted(body_user_tools, key=lambda t: t["name"]))
@@ -146,6 +169,11 @@ class PipeRequestToolsMethods:
         web_search_enabled = self.valves.WEB_SEARCH or __metadata__.get(
             "web_search_enforced", False
         )
+        if web_search_enabled and not self.get_model_info(actual_model_name).get(
+            "supports_web_search_tool", True
+        ):
+            logger.warning(f"Web search skipped: /v1/models reports no web search tool for {actual_model_name}")
+            web_search_enabled = False
         if web_search_enabled:
             # Get user location values with fallback to global valves
             city = (
@@ -227,8 +255,16 @@ class PipeRequestToolsMethods:
         # Add advisor tool if enabled (beta). Executor↔advisor pair validation
         # The advisor must be at least as capable as the executor.
         # If the pair is invalid, downgrade the advisor to the next compatible model.
-        if __user__["valves"].ENABLE_ADVISOR_TOOL:
-            executor_model = actual_model_name
+        # Opus 5.5 has no row in Anthropic's advisor compatibility table
+        # (2026-09-22), so any advisor would 400 the request. Normalize first so a
+        # dated id ("claude-opus-5-5-20260215" from Azure/custom proxies) still
+        # trips both the skip guard and the executor->advisor lookup below, matching
+        # get_model_info's handling of the same ids.
+        normalized_model_name = self._normalize_model_name(actual_model_name)
+        if __user__["valves"].ENABLE_ADVISOR_TOOL and normalized_model_name == "claude-opus-5-5":
+            logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
+        elif __user__["valves"].ENABLE_ADVISOR_TOOL:
+            executor_model = normalized_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
             # Valid advisor models per executor (advisor must be ≥ executor in capability),
@@ -236,20 +272,26 @@ class PipeRequestToolsMethods:
             # contain API-supported advisors, so a single membership check covers both
             # "unsupported" and "incompatible" cases.
             valid_advisors = {
-                "claude-haiku-4-5": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-4-6": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-5": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"],
-                # Sonnet 5.5 rejects Opus 4.8 / 4.7 / 4.6 and Sonnet 5 advisors (400).
-                "claude-sonnet-5-5": ["claude-opus-5-5", "claude-opus-5"],
-                "claude-opus-4-6": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-7": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-8": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-5-5": ["claude-opus-5-5", "claude-opus-5"],
-                "claude-opus-5": ["claude-opus-5-5", "claude-opus-5"],
+                "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-haiku-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+                ],
+                "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                ],
+                "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
+                "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-8": ["claude-opus-5", "claude-opus-4-8"],
+                "claude-opus-5": ["claude-opus-5"],
                 "claude-fable-5": ["claude-fable-5"],
                 "claude-mythos-5": ["claude-mythos-5"],
             }
-            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5-5", "claude-opus-5"])
+            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5"])
 
             adjusted_advisor_model = advisor_model
             if advisor_model not in allowed_advisors:
@@ -314,6 +356,13 @@ class PipeRequestToolsMethods:
                 if name in tool_names_seen:
                     continue
 
+                if name in anthropic_server_tool_names:
+                    continue
+
+                # OpenWebUI's Tool Search held it back; Claude finds it via search_tools.
+                if name in owui_held_back:
+                    continue
+
                 # Skip if toolname starts with _ or __
                 if name.startswith("_"):
                     logger.debug(f"Skipping private tool: {name}")
@@ -352,25 +401,28 @@ class PipeRequestToolsMethods:
 
             claude_tools.extend(sorted(user_tools, key=lambda t: t["name"]))
 
-        # Check if programmatic tool calling is active for this model
-        # When active, tools must NOT be deferred (defer_loading) because
-        # deferred tools loaded via tool_search may bypass allowed_callers enforcement
-        is_programmatic_active = False
-        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
-            model_info_ptc = self.get_model_info(actual_model_name)
-            is_programmatic_active = model_info_ptc.get("supports_programmatic_calling", False)
-
-        _defer_active = __user__["valves"].ENABLE_TOOL_SEARCH and not is_programmatic_active
+        user_excludes = normalize_tool_name_list(
+            __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
+        )
 
         for claude_tool in claude_tools:
             # Check if tool should be deferred for tool search
-            # IMPORTANT: Skip deferring when programmatic tool calling is active.
-            if _defer_active:
-                # Skip deferring if tool is in exclusion list
+            if (
+                native_tool_search
+                and claude_tool.get("name") in owui_deferred
+                and claude_tool["name"] != forced_tool_name
+            ):
+                claude_tool["defer_loading"] = True
+            elif native_tool_search:
+                # Skip deferring if tool is in exclusion list, or if the caller
+                # executes the tool itself. A passthrough tool is one the client
+                # sent in body.tools and will run on its own; making the model
+                # search for it first buys nothing and costs an extra round trip
+                # before it can answer (#35).
                 name = claude_tool["name"]
-                user_excludes = __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
                 if (
-                    name != forced_tool_name
+                    name not in api_tool_names
+                    and name != forced_tool_name
                     and name not in user_excludes
                 ):
                     # Calculate tool definition size (JSON representation)
@@ -423,6 +475,18 @@ class PipeRequestToolsMethods:
                 flags.append(f"type={t['type']}")
             if t.get("eager_input_streaming"):
                 flags.append("eager_stream")
-            logger.info(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
+            logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names
+
+    def _native_tool_search_active(self, actual_model_name: str, __user__: Dict[str, Any]) -> bool:
+        """Claude's own tool search (defer_loading) applies to this request.
+
+        Off under programmatic tool calling: deferred tools loaded via tool
+        search may bypass allowed_callers enforcement.
+        """
+        if not __user__["valves"].ENABLE_TOOL_SEARCH:
+            return False
+        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
+            return not self.get_model_info(actual_model_name).get("supports_programmatic_calling", False)
+        return True

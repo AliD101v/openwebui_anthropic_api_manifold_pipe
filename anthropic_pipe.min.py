@@ -4,9 +4,9 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.28
+version: 0.10.1
 license: MIT
-requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
+requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -29,7 +29,6 @@ Supports:
 - Code Execution Tool
 - Compaction
 - Vision
-- Context Editing (clear tool results and thinking blocks)
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
@@ -37,491 +36,27 @@ Supports:
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
-Changelog:
-v0.9.28
-- Added Claude Opus 5.5 (claude-opus-5-5): 1M context, 128k output, fast mode, compaction, dynamic filtering. Thinking is always on: `thinking:{"type":"disabled"}` is a 400 at every effort level, so the Thinking Toggle never sends it for this model and only decides whether an explicit adaptive `thinking` block (with `display`) is sent
-- Added Claude Sonnet 5.5 (claude-sonnet-5-5): 1M context, 128k output, compaction, dynamic filtering. `thinking:{"type":"disabled"}` is a 400 here too, so turning the Thinking Toggle off now sends `thinking:{"type":"between_tools"}` (the lowest thinking setting). Like disabled on Opus 5 it is only accepted up to effort 'high', so xhigh/max are clamped to 'high'
-- Forced `tool_choice` (`any` / `tool`) is a 400 on both 5.5 models: Web Search Enforcement and OpenWebUI's required / function tool_choice now go out as `auto`. web_search is still offered, the model just isn't forced to call it
-- REFUSAL_FALLBACK on Sonnet 5.5 always uses Anthropic's per-category 'default' routing, even when a pinned fallback model is selected: only the 'default' form is accepted for that model
-- Advisor: Opus 5.5 is now a selectable advisor and both 5.5 models have executor/advisor pairings. Sonnet 5.5 rejects Opus 4.8 / 4.7 / 4.6 and Sonnet 5 advisors (400), so the advisor is upgraded to Opus 5.5 for that executor
-- The memory-review model list knows about Opus 5.5 and Sonnet 5.5
+Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.1
+- OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
+- ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
+
+v0.10.0
+- API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
+- temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
+- SDK 2.x authenticates with `Authorization: Bearer`. A custom ANTHROPIC_BASE_URL (proxy, gateway) also gets the key as `x-api-key` so gateways that read only that header keep working.
+- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it.
+- /v1/models: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (disabled or between_tools).
+- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400.
+
+v0.9.39
+- Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on.
+- Prompt cache kept for tool calls with two or more arguments (e.g. tool search's query + limit): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: messages_changed).
+- A server tool the model calls right after a client tool in the same response (e.g. bash after view_knowledge_file) stays in that assistant message on replay instead of moving into the next one.
+- Tool search: the system hint now names the deferred tools (sorted, changes only with the tool set). Without the names the model answered "use the weather tool" with web search instead of searching for the deferred tool.
+- Open Terminal plus code execution in one request: a system hint tells the model that only the terminal tools reach the user's terminal. Asked to run a command in the terminal, it used Anthropic's isolated code execution sandbox instead.
+- CACHE-DIFF debug log no longer reports block key-order differences as breaks; the API ignores them (measured), only tool `input` order counts. The [PAYLOAD] log line lists deferred tools.
 
-v0.9.27
-- Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
-- Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
-- Fixed error notices and the File Content collapsible being swallowed into the preceding paragraph: code-execution / text-editor errors and safety refusals now go through the same own-line guarantee as every other rendered block (#46, by @Willian-Zhang)
-- Fixed an empty SKILLS valve triggering the code_execution notification: OpenWebUI stores an empty array valve as "", which round-trips back as [""], and that is truthy. Blank entries are now dropped (#48, reported by @clang13)
-
-v0.9.26
-- Added human-in-the-loop tool approval (OpenWebUI 0.11.1). OpenWebUI enforces its gate inside its own tool loop, which a manifold never enters, so the setting silently did nothing here: with approval set to "ask", every client, builtin and Open Terminal tool call now waits for allow/deny, and a denial goes back to the model as a normal tool result so the turn continues
-- Fixed a client tool failing outright on an argument its schema does not declare (observed: `{"params": "{}"}` for a parameterless tool, streamed by the API itself). Undeclared keys are dropped before the call, as OpenWebUI does in its own loop
-- HIDE_BLOCKS is now a multiselect instead of a comma-separated string; existing string values still load
-- Fixed HIDE_BLOCKS never hiding code execution: the collapsible ignored the valve, and the bash / text editor variants were not recognised as the same block
-- Fixed total_tokens double-counting cache traffic; now input + output, matching OpenWebUI's usage contract, with cache reads and writes in their own two fields
-- Added ask_user (OpenWebUI 0.11.1) to the tool-search exclude list
-
-v0.9.25
-- The Anthropic API key valve (admin and per-user) is now stored encrypted, using Fernet with a key derived from WEBUI_SECRET_KEY. OpenWebUI's own valve encryption is opt-in (ENABLE_VALVE_ENCRYPTION, off by default), so on a default install the key otherwise sits in the functions table in plaintext. Where that flag is on, the pipe defers to OpenWebUI rather than encrypting twice. Existing plaintext keys keep working -- no migration step
-- Debug logs now start with the detected OpenWebUI version, and no longer contain the API key in plaintext
-- Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching). The 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
-- Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models
-- A failed model refresh no longer falls back to a cache that was fetched from different connection settings
-
-v0.9.24
-- Fixed the context-window reading OpenWebUI uses for auto-compaction: prompt_tokens/completion_tokens now carry the last call's full input (uncached + cache writes + cache reads) instead of being absent. input_tokens/output_tokens stay cumulative and uncached-only, so cost and the analytics page are unchanged. Under caching the old numbers understated occupancy badly, and compaction fired far too late or never
-- Sub-agent runs (OpenWebUI 0.11) now return plain prose: no collapsibles, no replay carriers, no token footer, no metadata markers. Their text is pasted into the parent agent's context, where all of that is pure token cost
-- Task models (title, tags, follow-ups, queries, image prompts, autocomplete, memory review) now pin their response shape with structured outputs, so a stray markdown fence can no longer cost OpenWebUI the whole task
-- Added the OpenWebUI 0.11 builtin tools to the tool-search exclude list: notify, timer, delegate_task, list_chat_files, grep_chat_files, query_chat_files
-- Fixed sampling params being sent to adaptive-thinking models on endpoints that report no capability metadata (Azure and other proxies, manual ENABLED_MODELS ids), which the API answers with a 400 (#36, reported by @attilaolah)
-- Corrected stale static model limits: Opus 4.6/4.7/4.8 and Sonnet 4.6 serve 128k output (were listed at 64k), Sonnet 4.5 serves a 1M window, and the 1M window no longer needs a beta header
-- Bumped the required Anthropic SDK to 0.121.0
-
-v0.9.23
-- Added Claude Opus 5 (claude-opus-5): 1M context, 128k output, thinking on by default, full effort ladder incl. max, fast mode (#45, by @AliD101v)
-- Thinking Toggle now works on thinking-on-by-default models (Opus 5 / Sonnet 5): turning it off sends thinking:{"type":"disabled"} instead of just omitting the field, and clamps effort to 'high' because Opus 5 rejects disabled thinking at xhigh/max
-- Added REFUSAL_FALLBACK valve: retry a safety-refused request server-side, either on Anthropic's per-category recommendation ('default') or on a pinned model
-- Removed Fast Mode for Opus 4.7 (2026-07-24): speed:"fast" now errors there instead of falling back to standard speed
-- Fixed a prompt-cache killer: user tools are now appended name-sorted. OpenWebUI's tool order shifts on its own (toggling a tool appends it to the end of selectedToolIds, a page reload resets it to the model's order, MCP servers return any order), and the same tool set in a different order rebuilt the entire cache
-- Bumped the required Anthropic SDK to 0.120.0
-- Advisor and memory-review model lists know about Opus 5; advisor now defaults to it
-
-v0.9.22
-- Added Compatibility for OpenWebUI's ENABLE_MEMORY_BACKGROUND_REVIEW: task requests now forward their system prompt instead of dropping it, so the memory reviewer gets its "return only valid JSON" instruction
-- Added MEMORY_REVIEW_MODEL valve to run the background memory review on a cheap model (default Haiku) instead of the chat model
-- Task requests (title, tags, follow-ups, memory review) are stripped down to plain prose: no collapsibles, no cache diagnostics, no replay carriers, no inline markers
-- HIDE_BLOCKS moved from the admin Valves to the UserValves — hiding a collapsible is a personal display preference
-
-v0.9.21
-- Added HIDE_BLOCKS valve to individually hide details in the conversation: Known values: web_search, web_fetch, tool_search, advisor, code_execution, compaction
-- Added CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT valve to separately cache System Prompt and Tools Array for an hour (useful for big multi-user setups)
-- Added Compatibility for new OpenWebUI Memory System Format so cache stays stable
-- Added cached-% and a call count for multi-call turns on Token display
-- Fixed markdown breaking at text content_block boundaries
-- CACHE-DIFF logging is breakpoint-aware and no longer reports the per-request memory/RAG appendix as a cache break when the API sees none
-
-v0.9.20
-- Fixed a "API key is invalid" error when using ANTHROPIC KEY Valve
-
-v0.9.19
-- Removed static ANTHROPIC_BUILTIN_TOOL_NAMES in favor of default TOOL_SEARCH_EXCLUDE_TOOLS including all openwebui internal tools
-- Fixed open-terminal tool calls and read_file bugs, experimental bash and text_editor tool support seems to work now, needs further testing
-- Fixed token explosion on requests containing images and binary files from older read_file tool calls from open-terminal
-
-v0.9.18
-- Client tool results containing base64 image data now correctly get's converted in Anthropic image blocks instead of raw base64 TEXT
-- Use of native open-webui image compression user settings in image blocks
-- Added Claude Sonnet 5 (claude-sonnet-5): 1M context, 128k output, adaptive thinking on by default
-- Removed Fast Mode for Opus 4.6
-- Experimental Claude on AWS Support: use ANTHROPIC_WORKSPACE_ID Valve to try it out
-- Added ENABLED_MODELS valve + date-suffix normalization + static model fallback for endpoints without /v1/models (Azure/proxies)
-- Added ANTHROPIC_API_KEY Enviromental Variable readout for easier configuration
-- Increased the max-output-token fallback, 4096 is indeed to low :)
-- Fixed File Downloading from code_execution container using Anthropic Files API
-
-v0.9.17
-- Added Fable and Mythos as advisor models
-- Advisor Models is now dynamically adjusted to the next best model if not compatible
-
-v0.9.16
-- Added Claude Fable and Mythos 5 alongside new stop_reasons and refusals
-
-v0.9.15
-- Fixed Newline after Citations
-- Fixed Tool calling error when tools payload changes while old tool results are still present in previous answers
-- Fixed Stop Handling
-- Fixed Status Emitting for Tool Search and Advisor
-
-v0.9.14
-- Added Claude Opus 4.8
-- Promt caching bugfixes when using native PDF Upload and Images
-
-v0.9.13
-- Token counting is now Claude-Code-style: `total_tokens` only counts NEW tokens (uncached input + cache_creation + output) instead of all tokens
-- Added `ENABLE_CACHE_DIAGNOSTICS` valve for debug purposes
-
-v0.9.12
-- Refactored the pipe into modular source files under `src/anthropic_pipe/`.
-- Extracted request payload creation into `request_payload.py` for cache/debug work.
-- Split streaming content-block handling into per-content modules and added a build step that compiles/minifies the OpenWebUI single-file artifact before deploy.
-- Fixed Anthropic API Skills container payload shape and added clearer Files API / code execution guidance.
-
-v0.9.11
-- Added async handling for run_command <-> bash tool
-- Added all anthropic server tools as TOOL_SEARCH_EXCLUDE_TOOLS
-
-v0.9.10
-- Added Experimental path for using Anthropics native (`bash_20250124`) to use with OpenTerminal. Use Valve `ENABLE_BASH_TOOL`
-- Added Experimental path for using Anthripics native (`text_editor_20250728` / `str_replace_based_edit_tool`) tools to use with Open Terminal. Use Valve `ENABLE_TEXT_EDITOR_TOOL`.
-
-v0.9.9
-- Fixed Tool Search Block reconstruction as well. Displays collapsible instead of status
-- Added Experimental support for the Advisor tool support (beta `advisor-tool-2026-03-01`). New valves:
-  `ENABLE_ADVISOR_TOOL`, `ADVISOR_MODEL` (default claude-opus-4-7),
-  `ADVISOR_MAX_USES` (0=unlimited), `ADVISOR_CACHING` (off/5m/1h ephemeral).
-
-v0.9.8
-- Complete overhaul of how message blocks are recreated for a new turn to align with
-    Anthropic cache restrictions.
-- Cache now should not break on new turns even when using RAG, image or PDF upload,
-    memory, tools, and similar flows.
-- Refactored tool / thinking output so grouped activity renders as one collapsible UI block.
-
-v0.9.7
-- Preserves thinking signatures across turns for better replay continuity and cache behavior.
-
-v0.9.6
-- Updated for Open WebUI 0.9.0+ async APIs.
-
-v0.9.5
-- Added Claude Opus 4.7 and the new xhigh effort level.
-
-v0.9.4
-- Added Cache Statistics to Token Count Message
-
-v0.9.3
-- Moved Compaction and Context Editing into UserValves.
-- Upgraded token display to Off / On / With Cache.
-
-v0.9.2
-- added compaction and client-side compaction trim: drops messages before the last compaction boundary before sending
-and added message trim optimization
-
-v0.9.1
-- return whole message at the end and switched from chat:completion to message:delta event to prevent empty messages
-
-v0.9
-- Fixed total_usage access bug when usage capability is not enabled on model
-- Removed Sonnet 4 and Opus/Sonnet 4.5 from 1 Mio context windows support
-- Fetch model capabilites like max_input_token now directly from the API
-- Added support for thinking.display: "omitted" (https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking#controlling-thinking-display)
-
-v0.8.12
-- Add API tool passthrough for external function calling
-- Added ANTHROPIC_BASE_URL valve to allow routing all API requests through a custom proxy URL
-- Fixed Tool Result output Grouping
-- Decluddered the if/else horror in event_type handling
-- Fixed OpenTerminal Tools
-
-v0.8.11
-- Added Caching time CACHE_TTL valve to choose between 5 minutes (default) and 1 hour
-- Fixed TTS in Call Mode
-- Added chat:completion done event in PHASE 7 for proper stream termination signalling
-- Fixed Tool Result and Thought Grouping for Openwebui 0.8.11
-- Fixed Programmatic Tool Call Issue
-
-v0.8.10
-- Pipe can now handle HTMLResponse Results from Tools (Rich UI with embedded iframes, HTML widgets, and file attachments)
-- Added Support for Openwebui Skills
-
-v0.8.9
-- Removed <details> tags from what's send to claude API to prevent hallucinations
-- Added Valves for Request and Tool call Timeouts
-- Increased MAX_TOOL_CALLS max limit for long agentic tasks
-- Added optional API Key set via UserValves (overrides header-level key)
-- Reintroduced the Ability for Claude to know how many tool calls are available until limit is hit
-- Removed 1 Mio Context Window Valve as it's now generally available
-
-v0.8.8
-- Fixed a Bug with interleaved thinking and tool calls where the API does not preserve the thinking blocks resulting in invalid requests
-- Tool Input and Code Execution Input is not correctly streamed in a collapsible container with spinner
-- Removed Status Update for Tool Calls and Code Execution as they are now streaming live with the new streaming strategy
-- Tool Call Errors get's correctly emitted now instead of silently ignored and causing unlimited spinning
-
-v0.8.7
-- Code execution blocks now use OpenWebUI native `<details type="code_interpreter">` format
-  - Spinner + "Analyzing…" / "Analyzed" transitions matching built-in code interpreter
-  - Duration tracking and display
-  - Output (stdout, stderr, tool call results) in HTML `output` attribute for CodeBlock rendering
-- Fixed live-streamed code blocks getting stuck on "Analyzing…" when new code_execution starts
-- Fixed empty "Analyzed" blocks by using accumulated code as fallback
-- Removed redundant status events for code execution ("Running code", "Code → Tool", "Code execution complete")
-- Fixed cache_control being placed on programmatic tool_use blocks with caller field
-- Removed _emit_code_execution_source calls (output now embedded in code_interpreter block)
-
-v0.8.6
-- Fixed Token Counting for new Analytics Tab
-- Properly formatted and grouped Thinking and Tool Result Blocks
-- Fixed Token Usage Status for 1 Mio Context Window
-
-v0.8.6
-- Fixed: Truncated streams (200 OK + no stop_reason after server tools) now auto-retry instead of silent empty response
-  - Detects when API returns thinking/server_tool blocks but no text and no stop_reason
-  - Auto-retries up to MAX_RETRIES times with clean state reset
-  - Shows user-visible status during retry and error message if all retries fail
-  - Root cause: Anthropic API overload (529) → SDK retry → 200 OK but truncated stream
-- Fixed: JSON.parse frontend error caused by pipe returning dict {} instead of empty string
-  - functions.py sent `data: {}` without [DONE] → frontend failed to parse as OpenAI chunk
-  - Now returns "" → proper finish_reason=stop + [DONE] SSE termination
-
-v0.8.6
-- Fixed: Truncated streams (200 OK + no stop_reason after server tools) now auto-retry instead of silent empty response
-  - Detects when API returns thinking/server_tool blocks but no text and no stop_reason
-  - Auto-retries up to MAX_RETRIES times with clean state reset
-  - Shows user-visible status during retry and error message if all retries fail
-  - Root cause: Anthropic API overload (529) → SDK retry → 200 OK but truncated stream
-- Fixed: JSON.parse frontend error caused by pipe returning dict {} instead of empty string
-  - functions.py sent `data: {}` without [DONE] → frontend failed to parse as OpenAI chunk
-  - Now returns "" → proper finish_reason=stop + [DONE] SSE termination
-
-v0.8.5
-- Refactored: Cache control logic consolidated into single `_apply_cache_control()` method
-  - All scattered cache_control placement removed from `_create_payload()` and tool loop
-  - Cache breakpoints now applied fresh right before every API call (initial + tool loop iterations)
-  - Bug fix: Tools now cached at all non-disabled levels (was missing at "messages" level)
-  - Tool loop: properly handles programmatic vs standard tool calling cache placement
-- Fixed: Effort level "max" now exclusively reserved for Opus 4.6 (was incorrectly allowed for Sonnet 4.6)
-- Fixed: pause_turn stop reason now auto-continues instead of ending with error message
-- Fixed: bash_code_execution_tool_result missing explicit error_code check — errors were silently ignored
-- Fixed: text_editor_code_execution_tool_result missing explicit error_code check
-- Fixed: code_execution_tool_result missing explicit error_code check
-- All server tool errors (web_search, web_fetch, code_execution, bash, text_editor) now emit user-visible error messages
-
-v0.8.4
-- Fixed: Streaming overloaded_error (HTTP 200 + SSE error) now retries instead of failing immediately (GH #19)
-- Fixed: Non-streaming OverloadedError (529) was falling through to generic APIStatusError handler instead of retrying
-- Added dedicated OverloadedError exception handler with proper retry logic
-- APIStatusError handler now checks e.body for overloaded_error type and retries if applicable
-
-v0.8.3
-- Text files created via text_editor (md, txt, csv, json, etc.) now display inline as markdown instead of code blocks
-- Code files created via text_editor use proper syntax highlighting based on file extension
-- Dynamic filtering valve description updated with speed vs quality tradeoff info (~60s vs ~7s)
-- Added concise API payload logging at DEBUG level (model, tools, system size, container, max_tokens, thinking mode)
-- Added tool result content size logging for tool call loop debugging
-
-v0.8.2
-- Streamlined code_execution UI for web search/fetch with dynamic filtering
-  - When dynamic filtering is active (without programmatic tool calling), code_execution UI is suppressed
-  - Only shows clean status: "🔍 Searching the web..." / "🌐 Fetching URL..."
-- Fixed max_uses not working with dynamic filtering web tools (20260209 versions don't support max_uses)
-- Added web_fetch status messages (start, URL being fetched, done/error)
-- Code execution output now emitted as source/citation event (visible in citation panel)
-- Consecutive code execution blocks are merged into one collapsible <details> block
-- Added web_fetch_tool_result handler with error detection
-
-v0.8.1
-- Added experimental Files API Support for uploading files to the Container. Feedback welcome!
-- Added a Valve to control wheter Opus/Sonnet 4.6 should use the new dynamic web_fetching and web_searching (At least I have issues with that)
-
-v0.8.0
-- Major streaming refactor: uses Anthropic SDK message accumulation instead of manual block tracking
-- Implemented Fine-grained tool streaming with eager_input_streaming
-- Tool search status now shows the actual search query
-- Added web_fetch Tool
-- Finally added Programmatic Tool Calling
-- Code execution blocks display code, tool calls, and output in a unified collapsible block
-- Updated web_search to use latest version with dynamic filtering support
-- Model capabilities updated for Sonnet 4.5/4.6 and Opus 4.6 dynamic filtering support
-- Added stop_reason debug logging for tool loop diagnostics
-- Citations appear AFTER the cited text again
-
-v0.7.1
-- Removed deprecated Models Sonnet 3.7 and Haiku 3
-
-v0.7.0
-- Added Sonnet 4.6 model support
-- Added Fast Mode support (speed: "fast" for Opus 4.6)
-- Added web_fetch tool (URL content retrieval)
-- Added memory tool integration with OpenWebUI memory system
-- Added programmatic tool calling (allowed_callers for code execution)
-- Fixed task model bug: _run_task_model_request() was called with extra argument
-
-v0.6.3
-- Added Opus 4.6
-- Added Support for effort: max
-- Added Support for Data residency
-- Added messages for stop_reason in case of refusal, stop_sequence or context window exceeded
-- Added ENABLE_INTERLEAVED_THINKING valve for enabling Thinking between Tool Calls
-- Homogenized Thinking and Tool Call/Results streaming to match build in OpenAI/Ollama system
-
-v0.6.2
-- Reordered Payload for better Caching
-
-v0.6.1
-- Full Skills Support: Users can add skills (eg. pptx, xlsx, docx, pdf) or custom skills already uploaded to the Anthropic Site
-- Skills are validated against the List Skills API endpoint with caching to avoid redundant API calls
-- Invalid skills are logged and users are notified via warning message
-
-v0.6
-- Thinking, Tool Results and Code Execution now streams correctly and is folded at the end of the stream
-- Tool Search Tool is now working correctly
-- Added a new Companion Filter that is overwriting internal web_search and code_interpreter in favor of the anthropic tools
-- Adding Files to the Conversation while using code interpreter now uploads the files to Anthropic Files API so they can be used by code execution VM
-- Fixed Code Execution Tool: New Anthropic bash_code_execution and text_editor_code_execution tools are used now
-- Added Buildin Openwebui Tools added in 0.7.0 - Be aware that this is introducing a lot of tokens. Best use with Tool Search
-- USE_PDF_NATIVE_UPLOAD is now True by default, PDF Files now are embedded in to the correct user message every conversation step, added invisible Markdown Markers for storing this data in assistant messages
-- Container ID persists across multi-turn conversations for code execution state continuity
-- RAG is now working correctly in conjunction with Native PDF File upload, removing all sources from the RAG message which were already uploaded as native documents
-
-v0.5.12
-- Thinking is now streamed in the UI and folded when the thought process has ended
-
-v0.5.11
-- Added Compatibility to Build-in Tools from OpenWebUI 0.7.x
-
-v0.5.10
-- Performance: Pre-compiled regex patterns at module level (5-10x faster pattern matching)
-- Performance: Added debug logging guards to prevent expensive JSON serialization
-- Documentation: Added comprehensive docstring and section comments to pipe() method
-
-v0.5.9
-- PDF with 'Use Full Document Content' mode will then be uploaded as base64 documents instead of RAG text extraction, use UserValve USE_PDF_NATIVE_UPLOAD to Toggle
-
-v0.5.8
-- Fixed UnboundLocalError for 'total_usage' variable when opening new chats
-- Added code execution to default TOOL_SEARCH_EXCLUDE_TOOLS list
-
-v0.5.7
-- Added Valve to exclude specific tools from deferred loading when tool search is enabled (web_search excluded by default)
-- Web Search Toogle Filter overrides WEB_SEARCH Valve
-- Fixed a Bug in Tool Search return
-
-v0.5.6
-- Added Context Editing feature (clear_tool_uses, clear_thinking) with configurable strategies
-- Added Tool Search feature (BM25/Regex) with deferred tool loading
-- Status events for context clearing with token counts
-
-v0.5.5
-- Fixed effort parameter support by upgrading Anthropic SDK from 0.60.0 to 0.75.0
-
-v0.5.4
-- Fixed Message Caching Problems when using RAG or Memories
-
-v0.5.3
-- Added Support for Anthropic Effort Levels (low, medium, high)
-- Added Support for Opus 4.5
-- Use correct logger for logging
-- Removed DEBUG Valve
-- Introduced UserValves for setting user-specific options like thinking, effort, web search limits and location
-
-v0.5.2
-- Fixed usage statistics accumulation for multi-step tool calls
-- Correctly sums input and output tokens across all turns in a request
-
-v0.5.1
-- Fixed caching issue in tool execution loops where cache_control marker could be lost
-- Optimized caching for multi-step tool calls by moving cache breakpoint to the latest tool result
-
-v0.5.0
-- **CRITICAL FIX**: Eliminated cross-talk between concurrent users/requests
-- Removed shared instance state (self.eventemitter, self.request_id) that caused response mixing
-
-v0.4.9
-- Performance optimization: Moved local imports to top level
-- Fixed fallback logic for model fetching when API fails
-
-v0.4.8
-- Added configurable MAX_TOOL_CALLS valve (default: 15, range: 1-50)
-- Moved tool execution status events to content_block_start for immediate feedback (prevents stalling on long parameters)
-- Added proactive warning to Claude when only 1 tool call remains before limit
-- System message injected before final call to encourage text response instead of more tool calls
-- Added user notifications when approaching limit (≤3 calls) and when limit is reached
-- Improved event loop yielding with asyncio.sleep() for reliable status event delivery on heavy tool calls loads
-
-v0.4.7
-- Fixed potential data leakage between concurrent users
-- Code cleanup and stability improvements
-
-v0.4.6
-- Tool results now display input parameters at the top
-- Shows "Input:" section with tool parameters before "Output:" section
-- Improves visibility of what parameters were passed to each tool call
-
-v0.4.5
-- Added status events for local tool execution (AIT-102)
-- Tools now show "Executing tool: {tool_name}" when they start
-- Tools show "Waiting for X tool(s) to complete..." during execution
-- Tools show "Tool execution complete" when finished
-- Improves UX for long-running tools - users now see activity instead of apparent hanging
-
-v0.4.4
-- Tool calls now execute in parallel and start immediately when detected
-- Server tools (e.g., web_search) are no longer misidentified as local tools
-- Web search now emits correct status events during execution
-- Fixed final message chunk not being flushed in some streaming scenarios
-
-v0.4.3
-- Fixed compatibility with OpenWebUI "Chat with Notes" feature
-- Added filtering for empty text content blocks to prevent API errors
-- Messages with empty content arrays are now skipped (fixes empty assistant messages from Notes chat)
-
-v0.4.2
-- Fixed NoneType error in OpenWebUI Channels when models are mentioned (@model)
-- Added safe event emitter wrapper to handle missing __event_emitter__ in channel contexts
-- All status/notification/citation events now gracefully handle None event emitter
-
-v0.4.1
-- Added a Valve to Show Token Count in the final status message
-- Auto-enable native function calling when tools are present (prevents OpenWebUI's function_calling task system)
-
-v0.4.0
-- Added Task Support (sorry, I forgot). Follow Ups, Titles and Tags are now generated.
-- Fix "invalid_request_error ", when a response contains both, a server tool and a local tool use (eg. web search and a local tool).
-
-v0.3.9
-- Added fine grained cache control valve with 4 levels: disabled, tools only, tools + system prompt, tools + system prompt + user messages
-
-v0.3.8
-- Removed MAX_OUTPUT_TOKENS valve - now always respects requested max_tokens up to model limit
-- Simplified token calculation logic
-- Reworked the caching with active Openwebui Memory System, Memories are now extracted from system prompt and injected into user messages as context blocks
-- Refactored Model Info structure for maintainability
-- Pipe is now retrying request on overloaded, rate_limit or transient errors up to MAX_RETRIES valve
-- Status indicator is now shown while waiting for the first response (first response took very long when using eg. web_search tool)
-- Removed unused aiohttp and random imports
-
-v0.3.7
-- Fixed Extended Thinking compatibility with Tool Use (API now requires thinking blocks before tool_use blocks)
-- Added automatic placeholder thinking blocks when needed for API compliance
-- Added validation for all assistant messages with tool_use when Extended Thinking is enabled
-
-v0.3.6
-- Added 4.5 Haiku Model
-- Restructured Model Capabilities for more Maintainability
-
-v0.3.5
-- Fixed a bug where the last chunk was not sent in some cases
-- Improved error handling and logging
-- Added Correct Citation Handling for Web Search
-
-v0.3.4
-- Added Claude 4.5 Sonnet
-- Small Bugfix with final_message
-- Added OpenWebUI Token Usage Compatibility
-- Added a Check for Duplicate Tool Names and private tool name (starting with "_") to avoid API errors
-
-v0.3.3
-- Fixed Tool Call error
-
-v0.3.2
-- Fixed type and added changelog
-
-v0.3.1
-- Fixed a bug where message would disappear after Error occurs
-
-v0.3
-- Added Vision support (__files__ handling & image processing improvements)
-- Added Extended Thinking filter & metadata override with clamped budget logic (default 10K, safe min/max enforcement)
-- Added Web Search Enforcement toggle (one‑shot metadata flag forces web_search tool_choice)
-- Added Anthropic Code Execution Tool with toggle filter & beta header
-- Enabled fine‑grained tool streaming beta by default
-- Added metadata & valve controlled injection of code execution tool spec
-- Improved cache control: auto‑disables cache when dynamic Memory / RAG blocks detected; ephemeral caching for stable blocks
-- Refined tool_choice precedence (enforced web search before auto)
-- Added 1M context optional beta header for supported Sonnet 4 models
-- Improved malformed tool_use JSON salvage (_finalize_tool_buffer) & robust final chunk flush
-- Misc debug output refinements & system prompt cleanup
-
-v0.2
-- Fixed caching by moving Memories to Messages instead of system prompt
-- You can show Cache Usage Statistics with a Valve as Source Event
-- Fixed error where last chunk is not shown in frontend
-- Fixed defective event_emitters and removed unneeded method
-- Fixed unnecessary requirements
-- Implemented Web Search Valves and error handling
-- Robust error handling
-- Added Cache_Control for System_Prompt, Tools, and Message Array
-- Refactored for readability and support for new models
 """
 
 import re
@@ -552,15 +87,10 @@ from anthropic import (
     InternalServerError,
     PermissionDeniedError,
     NotFoundError,
+    OverloadedError,
     UnprocessableEntityError,
 )
 
-try:
-    from anthropic import OverloadedError
-except ImportError:
-
-    class OverloadedError(Exception):
-        pass
 from typing import Literal
 from fastapi import Request
 
@@ -577,25 +107,11 @@ MEMORY_CONTEXT_APPENDIX_HEADER = (
     "but context from a memory system to help answer the user's questions:\n\n"
 )
 
-PATTERN_RAG_TEMPLATE_WITH_CONTEXT = re.compile(
-    r"###\s*Task:.*?<context>.*?</context>", flags=re.DOTALL | re.MULTILINE
-)
-PATTERN_RAG_TEMPLATE_FALLBACK = re.compile(
-    r"###\s*Task:.*?$", flags=re.DOTALL | re.MULTILINE
-)
 PATTERN_EMPTY_CONTEXT = re.compile(r"<context>\s*</context>", flags=re.DOTALL)
 
 PATTERN_SOURCE_TAGS = re.compile(r"<source[^>]*>.*?</source>", flags=re.DOTALL)
 
 PATTERN_RAG_MESSAGE = re.compile(r"### Task:.*?<context>.*?</context>", re.DOTALL)
-
-PATTERN_SOURCE_TAG = re.compile(
-    r'<source[^>]*name="([^"]+)"[^>]*>.*?</source>\s*', re.DOTALL
-)
-
-PATTERN_EMPTY_ATTACHED = re.compile(
-    r"<attached_files>\s*</attached_files>\s*", re.DOTALL
-)
 
 PATTERN_TOOL_CALLS_DETAILS = re.compile(
     r'\n?<details type="tool_calls"(?![^>]*data-payload-b64=)[^>]*>.*?</details>\n?',
@@ -635,6 +151,68 @@ HIDDEN_BLOCKS: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
     "anthropic_pipe_hidden_blocks", default=frozenset()
 )
 
+ANTHROPIC_SERVER_TOOL_NAMES = [
+    "web_search",
+    "web_fetch",
+    "code_execution",
+    "bash_code_execution",
+    "text_editor_code_execution",
+    "tool_search_tool_regex",
+    "tool_search_tool_bm25",
+    "advisor",
+    "mcp_toolset",
+    "memory",
+    "bash",
+    "str_replace_based_edit_tool",
+    "computer",
+]
+
+OPENWEBUI_BUILTIN_TOOL_NAMES = [
+    "add_memory", "ask_user", "calculate_timestamp", "create_automation",
+    "create_calendar_event", "create_tasks", "delegate_task",
+    "delete_automation", "delete_calendar_event", "delete_memory",
+    "edit_image", "execute_code", "fetch_url", "generate_image",
+    "get_current_timestamp", "grep_chat_files", "grep_knowledge_files",
+    "list_automations", "list_chat_files", "list_knowledge",
+    "list_knowledge_bases", "list_memories", "list_memory_paths",
+    "notify", "query_chat_files", "query_knowledge_bases",
+    "query_knowledge_files", "read_memory_path", "replace_memory_content",
+    "replace_note_content", "search_calendar_events",
+    "search_channel_messages", "search_channels", "search_chats",
+    "search_knowledge_bases", "search_knowledge_files", "search_memories",
+    "search_notes", "search_web", "timer", "toggle_automation",
+    "update_automation", "update_calendar_event", "update_memory",
+    "update_task", "view_channel_message", "view_channel_thread",
+    "view_chat", "view_file", "view_knowledge_file", "view_note",
+    "view_skill", "read_skill_file", "create_skill", "update_skill_files",
+    "write_note",
+
+    "kb_exec",
+    "display_file", "get_process_status", "glob_search", "grep_search",
+    "kill_process", "list_files", "list_processes", "read_file",
+    "replace_file_content", "run_command", "send_process_input",
+    "write_file",
+]
+
+DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
+    ANTHROPIC_SERVER_TOOL_NAMES + OPENWEBUI_BUILTIN_TOOL_NAMES
+)
+
+OWUI_SEARCH_TOOL_NAME = "search_tools"
+OWUI_CALL_TOOL_NAME = "call_tool"
+OWUI_TOOL_MANIFEST_RE = re.compile(r"\n?<available_tools>\n.*?</available_tools>", re.DOTALL)
+
+def normalize_tool_name_list(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return {
+        name.strip()
+        for item in items
+        for name in str(item).split(",")
+        if name.strip()
+    }
+
 SLIM_OUTPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "anthropic_pipe_slim_output", default=False
 )
@@ -669,15 +247,6 @@ PATTERN_TRAILING_SPACES = re.compile(r"[ \t]+$", flags=re.MULTILINE)
 PATTERN_EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
 
 try:
-    from open_webui.models.models import Models, ModelForm
-
-    MODELS_AVAILABLE = True
-except ImportError:
-    Models = None
-    ModelForm = None
-    MODELS_AVAILABLE = False
-
-try:
     from cryptography.fernet import Fernet, InvalidToken
 
     VALVE_ENCRYPTION_AVAILABLE = True
@@ -686,13 +255,7 @@ except ImportError:
     InvalidToken = Exception
     VALVE_ENCRYPTION_AVAILABLE = False
 
-try:
-    from pydantic_core import core_schema
-
-    PYDANTIC_CORE_AVAILABLE = True
-except ImportError:
-    core_schema = None
-    PYDANTIC_CORE_AVAILABLE = False
+from pydantic_core import core_schema
 
 ENCRYPTED_VALVE_PREFIX = "encrypted:"
 
@@ -700,6 +263,22 @@ try:
     from open_webui.env import VERSION as OPENWEBUI_VERSION
 except Exception:
     OPENWEBUI_VERSION = "unknown"
+
+def _owui_version_below(target: tuple) -> bool:
+    try:
+        parts = tuple(int(p) for p in str(OPENWEBUI_VERSION).split("-")[0].split(".")[:3])
+    except ValueError:
+        return False
+    return parts < target
+
+try:
+    from open_webui.models.models import Models, ModelForm
+
+    MODELS_AVAILABLE = True
+except ImportError:
+    Models = None
+    ModelForm = None
+    MODELS_AVAILABLE = False
 
 try:
     from open_webui.env import ENABLE_VALVE_ENCRYPTION as OPENWEBUI_ENCRYPTS_VALVES
@@ -754,25 +333,17 @@ def decrypt_valve_secret(value: Any) -> str:
             "have changed. Re-enter the API key in the valves."
         ) from e
 
-if PYDANTIC_CORE_AVAILABLE:
+class EncryptedStr(str):
 
-    class EncryptedStr(str):
+    @classmethod
+    def _validate(cls, value: Any) -> "EncryptedStr":
+        return cls(encrypt_valve_secret(str(value or "")))
 
-        @classmethod
-        def _validate(cls, value: Any) -> "EncryptedStr":
-            return cls(encrypt_valve_secret(str(value or "")))
-
-        @classmethod
-        def __get_pydantic_core_schema__(cls, source_type, handler):
-            return core_schema.no_info_after_validator_function(
-                cls._validate, core_schema.str_schema()
-            )
-
-        def get_secret(self) -> str:
-            return decrypt_valve_secret(self)
-
-else:
-    EncryptedStr = str
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        return core_schema.no_info_after_validator_function(
+            cls._validate, core_schema.str_schema()
+        )
 
 try:
     from open_webui.utils.tools import get_builtin_tools
@@ -876,6 +447,10 @@ class ToolUseState:
     running_tasks: list[Any] = field(default_factory=list)
     progress_blocks: dict[str, str] = field(default_factory=dict)
     api_passthrough: bool = False
+
+    passthrough_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    text_before_passthrough: Optional[str] = None
 
     def reset_for_iteration(self) -> None:
         self.running_tasks = []
@@ -1012,30 +587,7 @@ async def create_request_payload(
     __files__: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[dict, dict, List[str], List[str]]:
 
-    status_cls = globals().get("StatusEmitter")
-    if status_cls:
-        status = status_cls(__event_emitter__)
-    else:
-        class _PayloadStatus:
-            def __init__(self, emit_event):
-                self._emit_event = emit_event
-
-            async def activity(self, description: str) -> None:
-                await self._emit_event(
-                    {"type": "status", "data": {"description": description, "done": False}}
-                )
-
-            async def complete(self, description: str) -> None:
-                await self._emit_event(
-                    {"type": "status", "data": {"description": description, "done": True}}
-                )
-
-            async def notification(self, content: str, *, type: str = "warning") -> None:
-                await self._emit_event(
-                    {"type": "notification", "data": {"type": type, "content": content}}
-                )
-
-        status = _PayloadStatus(__event_emitter__)
+    status = StatusEmitter(__event_emitter__)
 
     actual_model_name = body["model"].split("/")[-1]
     model_info = pipe.get_model_info(actual_model_name)
@@ -1049,18 +601,13 @@ async def create_request_payload(
         "metadata": body.get("metadata", {}),
     }
 
-    _strip_sampling = bool(model_info.get("supports_adaptive_thinking"))
-    if not _strip_sampling and body.get("temperature") is not None:
-        payload["temperature"] = float(body.get("temperature", 0))
-    if not _strip_sampling and body.get("top_k") is not None:
-        payload["top_k"] = float(body.get("top_k", 0))
-    if not _strip_sampling and body.get("top_p") is not None:
-        payload["top_p"] = float(body.get("top_p", 0))
-
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    fast_requested = pipe.valves.ENABLE_FAST_MODE or (__metadata__ or {}).get(
+        "anthropic_fast", False
+    )
+    if fast_requested and model_info.get("supports_fast_mode", False):
         payload["speed"] = "fast"
         logger.debug("Fast Mode enabled for this request")
 
@@ -1088,6 +635,16 @@ async def create_request_payload(
     enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
         "anthropic_thinking", False
     )
+    if not enable_thinking and model_info.get("thinking_always_on"):
+
+        if effort_config is not None:
+            logger.debug(
+                f"Thinking can't be disabled on {actual_model_name}: "
+                f"effort '{effective_effort}' -> 'low'"
+            )
+            effective_effort = "low"
+            effort_config = {"effort": "low"}
+        enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
 
         if model_info["supports_adaptive_thinking"]:
@@ -1118,29 +675,22 @@ async def create_request_payload(
             )
 
         thinking_display = __user__["valves"].THINKING_DISPLAY
-        if thinking_display in ("omitted", "summarized"):
+        if thinking_display in ("omitted", "summarized", "updates"):
             thinking_config["display"] = thinking_display
 
         payload["thinking"] = thinking_config
     elif model_info.get("thinking_on_by_default"):
-        if not model_info.get("thinking_can_disable", True):
 
-            logger.debug(
-                f"{actual_model_name} cannot run without thinking; "
-                "Thinking Toggle is off, leaving `thinking` unset (adaptive)."
+        off_type = model_info.get("thinking_off_type", "disabled")
+        payload["thinking"] = {"type": off_type}
+        if effective_effort in ("xhigh", "max"):
+            logger.info(
+                f"Thinking off on {actual_model_name}: effort "
+                f"'{effective_effort}' is incompatible with thinking:{off_type}, "
+                "clamping to 'high'"
             )
-        else:
-
-            _thinking_off = model_info.get("thinking_off_type", "disabled")
-            payload["thinking"] = {"type": _thinking_off}
-            if effective_effort in ("xhigh", "max"):
-                logger.info(
-                    f"Thinking disabled on {actual_model_name}: effort "
-                    f"'{effective_effort}' is incompatible with "
-                    f"thinking:{_thinking_off}, clamping to 'high'"
-                )
-                effective_effort = "high"
-                effort_config = {"effort": "high"}
+            effective_effort = "high"
+            effort_config = {"effort": "high"}
 
     raw_messages = body.get("messages", []) or []
 
@@ -1322,7 +872,9 @@ async def create_request_payload(
         and model_info.get("supports_programmatic_calling", False)
     )
 
-    if activate_code_execution and not has_code_execution and not has_native_terminal_tools:
+    if activate_code_execution and not model_info.get("supports_code_execution_tool", True):
+        logger.warning(f"Code execution skipped: /v1/models reports no code execution tool for {actual_model_name}")
+    elif activate_code_execution and not has_code_execution and not has_native_terminal_tools:
         if use_programmatic_code_exec:
 
             code_exec_type = "code_execution_20260120"
@@ -1353,30 +905,14 @@ async def create_request_payload(
 
     beta_headers: list[str] = []
 
-    if pipe.valves.CACHE_CONTROL != "cache disabled":
-        beta_headers.append("prompt-caching-2024-07-31")
-
-    if has_code_execution:
-
-        code_exec_is_new = any(
-            t.get("type") == "code_execution_20260120" for t in tools_list
-        )
-        if not code_exec_is_new:
-            beta_headers.append("code-execution-2025-08-25")
-        if activate_code_execution:
-            beta_headers.append("files-api-2025-04-14")
+    if has_code_execution and activate_code_execution:
+        beta_headers.append("files-api-2025-04-14")
     if (
         pipe.valves.ENABLE_INTERLEAVED_THINKING
         and model_info["supports_thinking"]
         and not model_info["supports_adaptive_thinking"]
     ):
         beta_headers.append("interleaved-thinking-2025-05-14")
-
-    uses_old_web_fetch = any(
-        t.get("type") == "web_fetch_20250910" for t in tools_list
-    )
-    if pipe.valves.WEB_FETCH and uses_old_web_fetch:
-        beta_headers.append("web-fetch-2025-09-10")
 
     if has_files_api_uploads and "files-api-2025-04-14" not in beta_headers:
         beta_headers.append("files-api-2025-04-14")
@@ -1407,63 +943,21 @@ async def create_request_payload(
         payload["container"] = previous_container_id
         logger.info(f"📦 Reusing container from previous turn: {previous_container_id}")
 
-    if __user__["valves"].ENABLE_TOOL_SEARCH or pipe.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
-        beta_headers.append("advanced-tool-use-2025-11-20")
-
     if __user__["valves"].ENABLE_ADVISOR_TOOL:
         beta_headers.append("advisor-tool-2026-03-01")
 
-    context_editing_strategy = __user__["valves"].CONTEXT_EDITING_STRATEGY
-    if context_editing_strategy != "none":
-        if "context-management-2025-06-27" not in beta_headers:
-            beta_headers.append("context-management-2025-06-27")
+    owui_compacted = any(
+        isinstance(_b, dict) and "[CONVERSATION SUMMARY]" in str(_b.get("text", ""))
+        for _b in (system_messages or [])
+    )
+    if owui_compacted and __user__["valves"].ENABLE_COMPACTION:
+        logger.info("OpenWebUI context compaction detected - skipping API-side compaction for this request")
 
-        context_management = []
-
-        if (
-            context_editing_strategy in ["clear_thinking", "clear_both"]
-            and enable_thinking
-            and model_info["supports_thinking"]
-        ):
-            _keep_val = __user__["valves"].CONTEXT_EDITING_THINKING_KEEP
-            clear_thinking = {
-                "type": "clear_thinking_20251015",
-
-                "keep": "all" if _keep_val <= 0 else {
-                    "type": "thinking_turns",
-                    "value": _keep_val,
-                },
-            }
-            context_management.append(clear_thinking)
-
-        if (
-            context_editing_strategy in ["clear_tool_results", "clear_both"]
-            and len(tools_list) > 2
-        ):
-            clear_tool_uses = {
-                "type": "clear_tool_uses_20250919",
-                "trigger": {
-                    "type": "input_tokens",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_TRIGGER,
-                },
-                "keep": {
-                    "type": "tool_uses",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_KEEP,
-                },
-            }
-            if __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST > 0:
-                clear_tool_uses["clear_at_least"] = {
-                    "type": "input_tokens",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST,
-                }
-            if __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_TOOL_INPUT:
-                clear_tool_uses["clear_tool_inputs"] = True
-            context_management.append(clear_tool_uses)
-
-        if context_management:
-            payload["context_management"] = {"edits": context_management}
-
-    if __user__["valves"].ENABLE_COMPACTION and model_info.get("supports_compaction", False):
+    if (
+        __user__["valves"].ENABLE_COMPACTION
+        and not owui_compacted
+        and model_info.get("supports_compaction", False)
+    ):
         if "context-management-2025-06-27" not in beta_headers:
             beta_headers.append("context-management-2025-06-27")
         beta_headers.append("compact-2026-01-12")
@@ -1483,25 +977,25 @@ async def create_request_payload(
         payload["context_management"]["edits"].append(compact_edit)
 
     if model_info["supports_effort"] and effort_config:
-        beta_headers.append("effort-2025-11-24")
         payload["output_config"] = effort_config
 
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    if payload.get("speed") == "fast" and model_info.get("fast_mode_beta"):
         beta_headers.append("fast-mode-2026-02-01")
 
+    if (payload.get("thinking") or {}).get("display") == "updates":
+        beta_headers.append("thinking-display-updates-2026-08-18")
+
     fallback_mode = getattr(pipe.valves, "REFUSAL_FALLBACK", "off")
-    if fallback_mode != "off" and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE:
+    if (
+        fallback_mode != "off"
+        and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE
+        and model_info.get("supports_refusal_fallback", True)
+    ):
         beta_headers.append("server-side-fallback-2026-07-01")
 
-        _pin_fallback = fallback_mode != "default"
-        if _pin_fallback and model_info.get("refusal_fallback_default_only"):
-
-            logger.debug(
-                f"{actual_model_name} supports only the 'default' refusal fallback; "
-                f"ignoring pinned '{fallback_mode}'"
-            )
-            _pin_fallback = False
-        _fallbacks = [{"model": fallback_mode}] if _pin_fallback else "default"
+        _fallbacks = (
+            "default" if fallback_mode == "default" else [{"model": fallback_mode}]
+        )
         payload.setdefault("extra_body", {})["fallbacks"] = _fallbacks
         logger.debug(f"Server-side refusal fallback: {_fallbacks}")
 
@@ -1547,23 +1041,28 @@ async def create_request_payload(
 
         payload["betas"] = beta_headers
 
-        if __metadata__.get("web_search_enforced"):
+    if __metadata__.get("web_search_enforced"):
 
-            has_web_search = any(t.get("name") == "web_search" for t in tools_list)
-            if has_web_search:
-                if "thinking" not in payload:
+        has_web_search = any(t.get("name") == "web_search" for t in tools_list)
+        if has_web_search:
+            if "thinking" not in payload and not model_info.get("supports_forced_tool_choice", True):
+                payload["tool_choice"] = {"type": "auto"}
+                logger.info(
+                    f"{actual_model_name} rejects forced tool_choice - web_search added but not enforced (tool_choice=auto)"
+                )
+            elif "thinking" not in payload:
 
-                    payload["tool_choice"] = {"type": "tool", "name": "web_search"}
-                    logger.debug("Enforcing web_search via tool_choice")
-                else:
-
-                    payload["tool_choice"] = {"type": "auto"}
-                    logger.debug(
-                        "Thinking active - web_search added but not enforced (tool_choice=auto)"
-                    )
+                payload["tool_choice"] = {"type": "tool", "name": "web_search"}
+                logger.debug("Enforcing web_search via tool_choice")
             else:
 
                 payload["tool_choice"] = {"type": "auto"}
+                logger.debug(
+                    "Thinking active - web_search added but not enforced (tool_choice=auto)"
+                )
+        else:
+
+            payload["tool_choice"] = {"type": "auto"}
 
     if "tool_choice" not in payload and body.get("tool_choice"):
         api_tc = body["tool_choice"]
@@ -1580,19 +1079,16 @@ async def create_request_payload(
         else:
 
             payload["tool_choice"] = api_tc
+        if (
+            isinstance(payload["tool_choice"], dict)
+            and payload["tool_choice"].get("type") in ("tool", "any")
+            and not model_info.get("supports_forced_tool_choice", True)
+        ):
+            logger.info(
+                f"{actual_model_name} rejects tool_choice {payload['tool_choice']} - degrading to auto"
+            )
+            payload["tool_choice"] = {"type": "auto"}
         logger.debug(f"API tool_choice passthrough: {payload['tool_choice']}")
-
-    _final_tool_choice = payload.get("tool_choice")
-    if (
-        model_info.get("forced_tool_choice_unsupported")
-        and isinstance(_final_tool_choice, dict)
-        and _final_tool_choice.get("type") in ("any", "tool")
-    ):
-        logger.debug(
-            f"{actual_model_name} rejects forced tool_choice "
-            f"({_final_tool_choice}); downgrading to auto"
-        )
-        payload["tool_choice"] = {"type": "auto"}
 
     _reserved_server_tool_names = {
         "web_search",
@@ -1647,14 +1143,20 @@ async def create_request_payload(
 
     payload["tools"] = tools_list
 
-    if any(isinstance(_t, dict) and _t.get("defer_loading") for _t in tools_list):
+    _deferred_names = sorted(
+        _t["name"] for _t in tools_list
+        if isinstance(_t, dict) and _t.get("defer_loading") and _t.get("name")
+    )
+    if _deferred_names:
         _tool_search_nudge = {
             "type": "text",
             "text": (
                 "Some available tools are not listed directly in this request; they are "
                 "loaded on demand via the tool search tool (tool_search_tool_*). Before "
                 "telling the user you cannot do something or that you lack access to a tool, "
-                "call the tool search tool to find a relevant tool, then use whatever it returns."
+                "call the tool search tool to find a relevant tool, then use whatever it returns. "
+                "Prefer a matching tool from this list over web search: "
+                + ", ".join(_deferred_names)
             ),
         }
         if isinstance(system_messages, list):
@@ -1663,6 +1165,22 @@ async def create_request_payload(
             system_messages = [{"type": "text", "text": str(system_messages)}, _tool_search_nudge]
         else:
             system_messages = [_tool_search_nudge]
+
+    _tool_names = {_t.get("name") for _t in tools_list if isinstance(_t, dict)}
+    if (__metadata__ or {}).get("terminal_id") and "code_execution" in _tool_names:
+        _terminal_hint = {
+            "type": "text",
+            "text": (
+                "The user's terminal is reached only through the terminal tools "
+                f"({', '.join(sorted(_tool_names & {'bash', 'run_command', 'str_replace_based_edit_tool', 'write_file', 'read_file'})) or 'run_command'}). "
+                "code_execution is a separate, isolated sandbox without access to the user's "
+                "terminal or files; use it only for calculations or analysis, never when the "
+                "user refers to their terminal, machine or files there."
+            ),
+        }
+        system_messages = (system_messages if isinstance(system_messages, list)
+                           else ([{"type": "text", "text": str(system_messages)}] if system_messages else []))
+        system_messages = system_messages + [_terminal_hint]
 
     if system_messages and len(system_messages) > 0:
         payload["system"] = system_messages
@@ -1846,14 +1364,6 @@ class AdvisorResultBlockHandler(BaseHandler):
         await handle_advisor_result_block_start(getattr(event, "content_block", None), ctx)
         return True
 
-class ContextClearedBlockHandler(BaseHandler):
-
-    block_types = ("context_cleared",)
-
-    async def on_start(self, event: Any, ctx: Any) -> bool:
-        await handle_context_cleared_block_start(getattr(event, "content_block", None), ctx)
-        return True
-
 def default_handlers() -> list[Any]:
     return [
         TextBlockHandler(),
@@ -1866,7 +1376,6 @@ def default_handlers() -> list[Any]:
         CodeExecutionResultBlockHandler(),
         ToolSearchResultBlockHandler(),
         AdvisorResultBlockHandler(),
-        ContextClearedBlockHandler(),
     ]
 
 class NoopHandler:
@@ -2119,6 +1628,26 @@ def _filter_tool_args(tool_entry: Any, args: dict) -> dict:
         )
     return kept
 
+def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, str | None]:
+    try:
+        if not isinstance(tool_input, dict) or set(tool_input) != {"tool_name", "params"}:
+            raise ValueError("call_tool requires tool_name and params.")
+        name = tool_input["tool_name"]
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("tool_name must be a non-empty string.")
+        if name in {OWUI_SEARCH_TOOL_NAME, OWUI_CALL_TOOL_NAME}:
+            raise ValueError("call_tool cannot invoke search_tools or itself.")
+        if name not in tools:
+            raise ValueError(f'Tool "{name}" is not available. Search for an available tool.')
+        params = tool_input["params"]
+        if isinstance(params, str):
+            params = json.loads(params) if params.strip() else {}
+        if not isinstance(params, dict):
+            raise ValueError("params must decode to a JSON object.")
+    except (TypeError, ValueError) as error:
+        return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
+    return name, params, None
+
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     tool_use = ctx.state.tool_use
     server_tool = ctx.state.server_tool
@@ -2220,8 +1749,21 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         tool_name = tool_call_data.get("name", "")
         tool_input = tool_call_data.get("input", {})
 
+        call_tool_error = None
+        if tools and (tools.get(tool_name) or {}).get("tool_id") == f"builtin:{OWUI_CALL_TOOL_NAME}":
+            tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+
         tool = tools.get(tool_name) if tools else None
-        if (
+        if call_tool_error:
+
+            async def call_tool_error_result(message=call_tool_error):
+                return message
+
+            task = asyncio.create_task(
+                pipe._await_tool_task_result(tool_call_data, call_tool_error_result())
+            )
+            running_tool_tasks.append(task)
+        elif (
             tool_name == "bash"
             and pipe.valves.ENABLE_BASH_TOOL
             and tools
@@ -2289,6 +1831,22 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
             logger.info(
                 "🔄 API tool passthrough for '%s': returning tool input as response",
                 tool_name,
+            )
+
+            if tool_use.text_before_passthrough is None:
+                tool_use.text_before_passthrough = ctx.text()
+            tool_use.passthrough_calls.append(
+                {
+                    "id": tool_call_data.get("id") or tool_use.tool_id_at_start,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(
+                            tool_input if isinstance(tool_input, dict) else {},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
             )
             await emit_delta(json.dumps(tool_input, ensure_ascii=False))
             tool_use.api_passthrough = True
@@ -2504,10 +2062,13 @@ async def handle_server_tool_use_block_stop(ctx: Any) -> None:
             tool_input = json.loads(server_tool.input_buffer) if server_tool.input_buffer else {}
         except (json.JSONDecodeError, ValueError):
             tool_input = {}
+
+        after_client = bool(ctx.state.tool_use.progress_blocks)
         persisted_block = ctx.pipe._format_server_tool_use_block(
             tool_name=server_tool.active_name,
             tool_use_id=server_tool.active_id,
             tool_input=tool_input,
+            after_client=after_client,
         )
         await ctx.emit_block(persisted_block)
 
@@ -2515,6 +2076,7 @@ async def handle_server_tool_use_block_stop(ctx: Any) -> None:
             "block": persisted_block,
             "tool_name": server_tool.active_name,
             "tool_input": tool_input,
+            "after_client": after_client,
         }
 
     server_tool.active_name = None
@@ -2756,6 +2318,7 @@ async def handle_web_tool_result_block_start(
                     tool_name=carrier_info["tool_name"],
                     tool_use_id=tool_use_id,
                     tool_input=carrier_info["tool_input"],
+                    after_client=carrier_info.get("after_client", False),
                     result_payload=err_payload,
                     result_block_type="web_search_tool_result",
                     result_summary=error_msg,
@@ -2802,6 +2365,7 @@ async def handle_web_tool_result_block_start(
                         tool_name=carrier_info["tool_name"],
                         tool_use_id=tool_use_id,
                         tool_input=carrier_info["tool_input"],
+                        after_client=carrier_info.get("after_client", False),
                         result_payload=serialized_items,
                         result_block_type="web_search_tool_result",
                         result_summary=status_desc,
@@ -2828,6 +2392,7 @@ async def handle_web_tool_result_block_start(
                         tool_name=carrier_info["tool_name"],
                         tool_use_id=tool_use_id,
                         tool_input=carrier_info["tool_input"],
+                        after_client=carrier_info.get("after_client", False),
                         result_payload=err_payload,
                         result_block_type="web_fetch_tool_result",
                         result_summary=f"🌐 Fetch failed: {error_code}",
@@ -2850,6 +2415,7 @@ async def handle_web_tool_result_block_start(
                         tool_name=carrier_info["tool_name"],
                         tool_use_id=tool_use_id,
                         tool_input=carrier_info["tool_input"],
+                        after_client=carrier_info.get("after_client", False),
                         result_payload=serialized,
                         result_block_type="web_fetch_tool_result",
                         result_summary=f"🌐 URL fetched: {fetch_url}" if fetch_url else "🌐 URL fetched",
@@ -2927,6 +2493,7 @@ async def handle_advisor_result_block_start(content_block: Any, ctx: Any) -> Non
                 tool_name=carrier_info["tool_name"],
                 tool_use_id=tool_use_id,
                 tool_input=carrier_info["tool_input"],
+                after_client=carrier_info.get("after_client", False),
                 result_payload=serialized_content,
                 result_block_type="advisor_tool_result",
                 result_summary=status_desc,
@@ -2990,6 +2557,7 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
                 tool_name=carrier_info["tool_name"],
                 tool_use_id=tool_use_id,
                 tool_input=carrier_info["tool_input"],
+                after_client=carrier_info.get("after_client", False),
                 result_payload=serialized_content,
                 result_block_type="tool_search_tool_result",
                 result_summary=status_desc,
@@ -3006,64 +2574,291 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
             )
             await ctx.emit_block(standalone)
 
-async def handle_context_cleared_block_start(content_block: Any, ctx: Any) -> None:
-    cleared_info = getattr(content_block, "cleared", {})
-    cleared_type = (
-        getattr(cleared_info, "type", "unknown")
-        if hasattr(cleared_info, "type")
-        else cleared_info.get("type", "unknown")
-    )
-    cleared_tokens = (
-        getattr(cleared_info, "tokens_cleared", 0)
-        if hasattr(cleared_info, "tokens_cleared")
-        else cleared_info.get("tokens_cleared", 0)
+class ModelPricing:
+
+    RATES = {
+
+        "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
+        "claude-mythos-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
+        "claude-fable-5": {"input": 10.0, "output": 50.0},
+        "claude-mythos-5": {"input": 10.0, "output": 50.0},
+
+        "claude-opus-5-5": {
+            "input": 4.0,
+            "output": 20.0,
+            "cache_read": 0.20,
+            "fast_input": 8.0,
+            "fast_output": 40.0,
+        },
+        "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cache_read": 0.10},
+        "claude-haiku-5-5": {
+            "input": 0.10,
+            "output": 0.50,
+            "long_context_threshold": 100_000,
+            "long_input": 0.50,
+            "long_output": 2.50,
+        },
+        "claude-opus-5": {"input": 5.0, "output": 25.0, "fast_input": 10.0, "fast_output": 50.0},
+        "claude-opus-4-8": {"input": 5.0, "output": 25.0, "fast_input": 10.0, "fast_output": 50.0},
+        "claude-opus-4-7": {"input": 5.0, "output": 25.0},
+        "claude-opus-4-6": {"input": 5.0, "output": 25.0},
+        "claude-opus-4-5": {"input": 5.0, "output": 25.0},
+        "claude-sonnet-5": {"input": 2.0, "output": 10.0},
+        "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+        "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
+        "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+
+        "claude-opus-4-1": {"input": 15.0, "output": 75.0},
+        "claude-opus-4": {"input": 15.0, "output": 75.0},
+        "claude-sonnet-4": {"input": 3.0, "output": 15.0},
+        "claude-haiku-3-5": {"input": 0.8, "output": 4.0},
+        "claude-3-5-haiku": {"input": 0.8, "output": 4.0},
+    }
+
+    CACHE_WRITE_5M_MULTIPLIER = 1.25
+    CACHE_WRITE_1H_MULTIPLIER = 2.0
+    CACHE_READ_MULTIPLIER = 0.1
+
+    US_RESIDENCY_MULTIPLIER = 1.1
+
+    WEB_SEARCH_REQUEST_USD = 0.01
+
+    RATE_KEYS = (
+        "input",
+        "output",
+        "cache_write_5m",
+        "cache_write_1h",
+        "cache_read",
+        "fast_input",
+        "fast_output",
+        "long_context_threshold",
+        "long_input",
+        "long_output",
+        "long_cache_write_5m",
+        "long_cache_write_1h",
+        "long_cache_read",
     )
 
-    if cleared_type == "tool_uses":
-        status_desc = f"🧹 Cleared tool results: ~{cleared_tokens:,} tokens removed"
-    elif cleared_type == "thinking":
-        status_desc = f"🧹 Cleared thinking blocks: ~{cleared_tokens:,} tokens removed"
-    else:
-        status_desc = f"🧹 Context cleared: ~{cleared_tokens:,} tokens removed"
+    TOKEN_KEYS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
 
-    await ctx.status.activity(status_desc)
-    logger.debug("Context cleared: type=%s, tokens=%s", cleared_type, cleared_tokens)
+    def __init__(self, overrides_json: str = ""):
+        self._overrides = self._parse_overrides(overrides_json)
+
+    @classmethod
+    def _parse_overrides(cls, raw: str) -> dict:
+        raw = (raw or "").strip()
+        if not raw:
+            return {}
+        try:
+            overrides = json.loads(raw)
+            if not isinstance(overrides, dict):
+                raise ValueError("top level must be an object keyed by model id")
+            parsed: dict = {}
+            for model_id, patch in overrides.items():
+                if not isinstance(patch, dict):
+                    raise ValueError(f"{model_id!r}: expected an object of rates")
+                parsed[model_id] = {
+                    k: float(v) for k, v in patch.items() if k in cls.RATE_KEYS and v is not None
+                }
+            return parsed
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Ignoring MODEL_PRICING_OVERRIDES: {e}")
+            return {}
+
+    @staticmethod
+    def _normalize(model_name: str) -> str:
+
+        return re.sub(r"-\d{8}$", "", model_name)
+
+    def rates_for(self, model_name: str) -> Optional[dict]:
+        normalized = self._normalize(model_name)
+        base = self.RATES.get(model_name) or self.RATES.get(normalized)
+        rates: dict = dict(base) if base else {}
+        patch = self._overrides.get(model_name) or self._overrides.get(normalized)
+        if patch:
+            rates.update(patch)
+
+        if "input" not in rates or "output" not in rates:
+            return None
+        self._derive_cache_rates(rates, "")
+        if rates.get("long_context_threshold") and "long_input" in rates and "long_output" in rates:
+            self._derive_cache_rates(rates, "long_")
+        else:
+            for key in [k for k in rates if k.startswith("long_")]:
+                del rates[key]
+        return rates
+
+    @classmethod
+    def _derive_cache_rates(cls, rates: dict, prefix: str) -> None:
+        base = rates[f"{prefix}input"]
+        rates.setdefault(f"{prefix}cache_write_5m", base * cls.CACHE_WRITE_5M_MULTIPLIER)
+        rates.setdefault(f"{prefix}cache_write_1h", base * cls.CACHE_WRITE_1H_MULTIPLIER)
+        rates.setdefault(f"{prefix}cache_read", base * cls.CACHE_READ_MULTIPLIER)
+
+    @staticmethod
+    def record_call(
+        total_usage: dict,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_write_5m: int,
+        cache_write_1h: int,
+        cache_read: int,
+    ) -> None:
+        total_usage.setdefault("_call_log", []).append(
+            {
+                "prompt": input_tokens + cache_write_5m + cache_write_1h + cache_read,
+                "input": input_tokens,
+                "output": output_tokens,
+                "cache_write_5m": cache_write_5m,
+                "cache_write_1h": cache_write_1h,
+                "cache_read": cache_read,
+            }
+        )
+
+    @staticmethod
+    def update_call_output(total_usage: dict, output_tokens: int) -> None:
+        call_log = total_usage.get("_call_log")
+        if call_log:
+            call_log[-1]["output"] = output_tokens
+
+    @staticmethod
+    def record_billing_modifiers(usage: Any, total_usage: dict) -> None:
+        if not usage:
+            return
+        if getattr(usage, "speed", None) == "fast":
+            call_log = total_usage.get("_call_log")
+            if call_log:
+                call_log[-1]["fast"] = True
+        if getattr(usage, "inference_geo", None) == "us":
+            total_usage["_geo_us"] = 1
+
+    def _call_rates(self, rates: dict, *, fast: bool, long: bool) -> dict:
+        prefix = "long_" if long else ""
+        call_rates = {key: rates[f"{prefix}{key}"] for key in self.TOKEN_KEYS}
+        if fast and "fast_input" in rates and "fast_output" in rates:
+            input_scale = rates["fast_input"] / rates["input"] if rates["input"] else 1.0
+            output_scale = rates["fast_output"] / rates["output"] if rates["output"] else 1.0
+            call_rates = {
+                key: rate * (output_scale if key == "output" else input_scale)
+                for key, rate in call_rates.items()
+            }
+        return call_rates
+
+    def breakdown(self, model_name: str, total_usage: dict) -> Optional[dict]:
+        rates = self.rates_for(model_name)
+        if not rates:
+            return None
+
+        write_5m = total_usage.get("_cache_write_5m", 0)
+        write_1h = total_usage.get("_cache_write_1h", 0)
+        if not write_5m and not write_1h:
+            write_5m = total_usage.get("cache_creation_input_tokens", 0)
+
+        tokens = {
+            "input": total_usage.get("input_tokens", 0),
+            "output": total_usage.get("output_tokens", 0),
+            "cache_write_5m": write_5m,
+            "cache_write_1h": write_1h,
+            "cache_read": total_usage.get("cache_read_input_tokens", 0),
+        }
+
+        token_components = dict.fromkeys(self.TOKEN_KEYS, 0.0)
+        claimed = dict.fromkeys(self.TOKEN_KEYS, 0)
+        threshold = rates.get("long_context_threshold")
+        for call in total_usage.get("_call_log", ()):
+            fast = bool(call.get("fast"))
+            long = bool(threshold) and call.get("prompt", 0) > threshold
+            if not fast and not long:
+                continue
+            call_rates = self._call_rates(rates, fast=fast, long=long)
+            for key in self.TOKEN_KEYS:
+                token_components[key] += call.get(key, 0) * call_rates[key]
+                claimed[key] += call.get(key, 0)
+        standard = self._call_rates(rates, fast=False, long=False)
+        for key in self.TOKEN_KEYS:
+            token_components[key] += max(tokens[key] - claimed[key], 0) * standard[key]
+
+        geo = self.US_RESIDENCY_MULTIPLIER if total_usage.get("_geo_us") else 1.0
+        components = {
+            name: amount * geo / 1_000_000 for name, amount in token_components.items()
+        }
+        components["web_search"] = (
+            total_usage.get("_web_search_requests", 0) * self.WEB_SEARCH_REQUEST_USD
+        )
+        rounded = {name: round(amount, 6) for name, amount in components.items()}
+        return {name: amount for name, amount in rounded.items() if amount}
+
+    def estimate(self, model_name: str, total_usage: dict) -> Optional[float]:
+        components = self.breakdown(model_name, total_usage)
+        if components is None:
+            return None
+        return round(sum(components.values()), 6)
+
+    @staticmethod
+    def format_usd(cost: float) -> str:
+        if cost >= 1:
+            return f"${cost:.2f}"
+        if cost >= 0.01:
+            return f"${cost:.3f}"
+        return f"${cost:.4f}"
 
 class Pipe:
-    API_VERSION = "2023-06-01"
+    API_VERSION = "2026-10-21"
     _DEFAULT_API_BASE = "https://api.anthropic.com"
 
     MODEL_MAX_TOKENS_FALLBACK = {
         "claude-opus-5-5": 128000,
+        "claude-sonnet-5-5": 128000,
         "claude-opus-5": 128000,
         "claude-opus-4-8": 128000,
         "claude-opus-4-7": 128000,
         "claude-opus-4-6": 128000,
         "claude-opus-4-5": 64000,
-        "claude-sonnet-5-5": 128000,
         "claude-sonnet-5": 128000,
         "claude-sonnet-4-6": 128000,
         "claude-sonnet-4-5": 64000,
         "claude-fable-5": 128000,
         "claude-mythos-5": 128000,
+        "claude-fable-5-1": 128000,
+        "claude-mythos-5-1": 128000,
+        "claude-haiku-5-5": 128000,
         "claude-haiku-4-5": 64000,
     }
 
     MODEL_CONTEXT_LENGTH_FALLBACK = {
         "claude-opus-5-5": 1000000,
-        "claude-opus-5": 1000000,
         "claude-sonnet-5-5": 1000000,
+        "claude-opus-5": 1000000,
         "claude-sonnet-5": 1000000,
         "claude-fable-5": 1000000,
         "claude-mythos-5": 1000000,
+        "claude-fable-5-1": 1000000,
+        "claude-mythos-5-1": 1000000,
         "claude-opus-4-8": 1000000,
         "claude-opus-4-7": 1000000,
         "claude-opus-4-6": 1000000,
         "claude-sonnet-4-6": 1000000,
         "claude-sonnet-4-5": 1000000,
+        "claude-haiku-5-5": 1000000,
     }
 
     MODEL_CAPABILITY_OVERRIDES = {
+
+        "claude-fable-5-1": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            "supports_forced_tool_choice": False,
+        },
+        "claude-mythos-5-1": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            "supports_forced_tool_choice": False,
+        },
          "claude-fable-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
@@ -3091,17 +2886,22 @@ class Pipe:
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
             "supports_compaction": True,
+            "supports_thinking": True,
             "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
             "supports_structured_outputs": True,
 
-            "thinking_on_by_default": True,
-            "thinking_can_disable": False,
+            "thinking_always_on": True,
 
-            "forced_tool_choice_unsupported": True,
+            "supports_forced_tool_choice": False,
         },
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
+
+            "fast_mode_beta": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -3111,15 +2911,17 @@ class Pipe:
         "claude-sonnet-5-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
+            "supports_thinking": True,
             "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
             "supports_structured_outputs": True,
-
             "thinking_on_by_default": True,
+
             "thinking_off_type": "between_tools",
 
-            "forced_tool_choice_unsupported": True,
-
-            "refusal_fallback_default_only": True,
+            "supports_forced_tool_choice": False,
         },
         "claude-sonnet-5": {
             "supports_dynamic_filtering": True,
@@ -3128,9 +2930,24 @@ class Pipe:
             "supports_structured_outputs": True,
             "thinking_on_by_default": True,
         },
+        "claude-haiku-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+
+            "thinking_on_by_default": True,
+
+            "supports_refusal_fallback": False,
+        },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
+            "fast_mode_beta": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -3159,14 +2976,9 @@ class Pipe:
 
     _api_capabilities_cache: Dict[str, dict] = {}
     _api_capabilities_cache_ts: float = 0.0
-    _API_CACHE_TTL = 86400
 
     _api_capabilities_cache_sig: str = ""
 
-    REQUEST_TIMEOUT = (
-        300
-    )
-    THINKING_BUDGET_TOKENS = 4096
     TOOL_CALL_TIMEOUT = 120
 
     class Valves(BaseModel):
@@ -3182,7 +2994,7 @@ class Pipe:
         )
         ENABLED_MODELS: str = Field(
             default="",
-            description="Comma-separated model ids to expose (e.g. 'claude-opus-5-5,claude-sonnet-5-5'). "
+            description="Comma-separated model ids to expose (e.g. 'claude-opus-4-8,claude-sonnet-5'). "
             "Bypasses /v1/models auto-discovery — required for endpoints without it (Azure, some proxies). "
             "Empty = auto-discover from the API.",
         )
@@ -3198,8 +3010,10 @@ class Pipe:
         REFUSAL_FALLBACK: Literal[
             "off",
             "default",
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8",
+            "claude-sonnet-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
         ] = Field(
@@ -3208,7 +3022,8 @@ class Pipe:
                 "Retry server-side on another model when the safety classifier refuses a "
                 "request, instead of returning the refusal. 'default' lets Anthropic pick the "
                 "recommended model per refusal category; picking a model pins that one. "
-                "Claude API only — ignored on Bedrock / Vertex / Foundry endpoints."
+                "Claude API only — ignored on Bedrock / Vertex / Foundry endpoints and "
+                "for Haiku 5.5, which has no server-side fallback."
             ),
         )
         ENABLE_INTERLEAVED_THINKING: bool = Field(
@@ -3259,6 +3074,7 @@ class Pipe:
         )
         MEMORY_REVIEW_MODEL: Literal[
             "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "claude-sonnet-5",
             "claude-sonnet-5-5",
             "claude-opus-4-8",
@@ -3266,7 +3082,7 @@ class Pipe:
             "claude-opus-5-5",
             "same as chat model",
         ] = Field(
-            default="claude-haiku-4-5",
+            default="claude-haiku-5-5",
             description=(
                 "Model used for OpenWebUI's background memory review "
                 "(ENABLE_MEMORY_BACKGROUND_REVIEW). OpenWebUI runs that review on the "
@@ -3345,6 +3161,18 @@ class Pipe:
             "Changing the API key, base URL, workspace or ENABLED_MODELS always "
             "refreshes immediately, regardless of this setting.",
         )
+        MODEL_PRICING_OVERRIDES: str = Field(
+            default="",
+            description="JSON patch for the built-in price table used by the SHOW_COST estimate, in USD per "
+            "million tokens, keyed by model id. Keys: input, output, cache_write_5m, cache_write_1h, "
+            "cache_read, fast_input, fast_output; omitted cache rates derive from `input` at Anthropic's "
+            "standard multipliers (1.25x / 2x / 0.1x). Prompt-length pricing (Haiku 5.5): "
+            "long_context_threshold plus long_input / long_output (long_cache_* optional), applied to every "
+            "API call whose prompt exceeds the threshold. Example: "
+            '{"claude-sonnet-5": {"input": 3, "output": 15}, "my-proxy-model": {"input": 1, "output": 5}}. '
+            "Anthropic does not publish prices through the API, so this is how to track price changes "
+            "or a negotiated rate without waiting for a pipe release.",
+        )
 
     class UserValves(BaseModel):
         ANTHROPIC_API_KEY: EncryptedStr = Field(
@@ -3362,9 +3190,9 @@ class Pipe:
             le=64000,
             description="Thinking budget tokens",
         )
-        THINKING_DISPLAY: Literal["summarized", "omitted"] = Field(
+        THINKING_DISPLAY: Literal["summarized", "omitted", "updates"] = Field(
             default="omitted",
-            description="'summarized' returns summarized thinking, 'omitted' hides thinking in favor of faster time-to-first-text.",
+            description="'summarized' returns summarized thinking, 'omitted' hides thinking in favor of faster time-to-first-text, 'updates' (beta) hides reasoning but shows the short progress updates Fable 5 / 5.1, Opus 5.5 and Sonnet 5.5 write before each tool call.",
         )
         EFFORT: Literal["low", "medium", "high", "xhigh", "max"] = Field(
             default="high",
@@ -3407,6 +3235,15 @@ class Pipe:
             default="Off",
             description="Show context window progress after each response. 'With Cache' also shows cache read/write tokens.",
         )
+        SHOW_COST: bool = Field(
+            default=True,
+            description="Report the estimated USD cost of the turn as `cost_usd` plus a per-component "
+            "`cost_breakdown_usd` (input, output, cache writes/reads, web search) in the message usage "
+            "(visible in the message info tooltip and persisted for analytics) and, when SHOW_TOKEN_COUNT "
+            "is on, in the status line. Based on Anthropic list prices for the model, including cache "
+            "writes/reads, fast mode, US data residency and web searches; negotiated or third-party-proxy "
+            "rates are not known to the pipe unless the admin sets MODEL_PRICING_OVERRIDES.",
+        )
         WEB_SEARCH_MAX_USES: int = Field(
             default=5,
             ge=1,
@@ -3441,7 +3278,7 @@ class Pipe:
         )
         ENABLE_TOOL_SEARCH: bool = Field(
             default=True,
-            description="Enables a tool to search for tools before use. Trades latency for token efficiency.",
+            description="Enables a tool to search for tools before use. Trades latency for token efficiency. Wins over OpenWebUI's own Tool Search (Admin > Interface): the tools OpenWebUI holds back go out with Claude's native deferred loading and its search_tools / call_tool are dropped. Off: OpenWebUI's Tool Search runs unchanged if it is on, otherwise no tool search at all.",
         )
         TOOL_SEARCH_TYPE: Literal["regex", "bm25"] = Field(
             default="bm25",
@@ -3454,44 +3291,13 @@ class Pipe:
             description="Tools with longer JSON definitions characters will be deferred.",
         )
         TOOL_SEARCH_EXCLUDE_TOOLS: List[str] = Field(
-            default=["""
-            web_search,web_fetch,code_execution,
-            bash_code_execution,
-            text_editor_code_execution,
-            tool_search_tool_regex,
-            tool_search_tool_bm25,
-
-            advisor,
-            mcp_toolset,
-
-            memory,
-            bash,
-            str_replace_based_edit_tool,
-            computer,
-             add_memory, ask_user, calculate_timestamp, create_automation,
-            create_calendar_event, create_tasks, delegate_task,
-            delete_automation, delete_calendar_event, delete_memory,
-            edit_image, execute_code, fetch_url, generate_image,
-            get_current_timestamp, grep_chat_files, grep_knowledge_files,
-            list_automations, list_chat_files, list_knowledge,
-            list_knowledge_bases, list_memories, list_memory_paths,
-            notify, query_chat_files, query_knowledge_bases,
-            query_knowledge_files, read_memory_path, replace_memory_content,
-            replace_note_content, search_calendar_events,
-            search_channel_messages, search_channels, search_chats,
-            search_knowledge_bases, search_knowledge_files, search_memories,
-            search_notes, search_web, timer, toggle_automation,
-            update_automation, update_calendar_event, update_memory,
-            update_task, view_channel_message, view_channel_thread,
-            view_chat, view_file, view_knowledge_file, view_note,
-            view_skill, write_note,
-
-            kb_exec,
-
-            display_file, get_process_status, glob_search, grep_search,
-            kill_process, list_files, list_processes, read_file,
-            replace_file_content, run_command, send_process_input,
-            write_file"""],
+            default=list(DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS),
+            json_schema_extra={
+                "input": {
+                    "type": "multiselect",
+                    "options": list(DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS),
+                }
+            },
             description="Excluded Tools are always loaded. Anthropic tools and OpenWebUI-native tools (builtin + Open Terminal) are excluded by default.",
         )
 
@@ -3499,7 +3305,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
             default="claude-opus-5",
             description="Advisor model ID.",
         )
@@ -3524,7 +3330,7 @@ class Pipe:
         )
         ENABLE_COMPACTION: bool = Field(
             default=False,
-            description="Enable automatic context compaction. When input tokens exceed the trigger threshold, the API summarizes older conversation context to save tokens.",
+            description="Enable automatic context compaction. When input tokens exceed the trigger threshold, the API summarizes older conversation context to save tokens. If OpenWebUI's own Context Compaction (Admin > Interface) is enabled, it runs first and wins: the pipe detects its summary and does not compact a second time. Turn one of the two off; both at once is wasted work.",
         )
         COMPACTION_TRIGGER_TOKENS: int = Field(
             default=50000,
@@ -3535,40 +3341,6 @@ class Pipe:
         COMPACTION_INSTRUCTIONS: str = Field(
             default="",
             description="Custom summarization instructions for compaction. Replaces the default prompt entirely when set.",
-        )
-        CONTEXT_EDITING_STRATEGY: Literal[
-            "none", "clear_tool_results", "clear_thinking", "clear_both"
-        ] = Field(
-            default="none",
-            description="Context editing strategy: none (disabled), clear_tool_results, clear_thinking, or clear_both.",
-        )
-        CONTEXT_EDITING_THINKING_KEEP: int = Field(
-            default=0,
-            ge=0,
-            le=9999,
-            description="How many recent assistant turns with thinking blocks to preserve. 0 = keep all (maximizes cache hits — recommended). N>0 = sliding window; Anthropic server-side clears oldest thinking each turn once exceeded, which INVALIDATES the prompt cache prefix on every subsequent request. Only use N>0 if context-window pressure outweighs cache savings.",
-        )
-        CONTEXT_EDITING_TOOL_TRIGGER: int = Field(
-            default=50000,
-            ge=1000,
-            le=500000,
-            description="Token count threshold that triggers tool result clearing.",
-        )
-        CONTEXT_EDITING_TOOL_KEEP: int = Field(
-            default=5,
-            ge=0,
-            le=100,
-            description="Number of recent tool results to preserve when clearing.",
-        )
-        CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST: int = Field(
-            default=10000,
-            ge=0,
-            le=100000,
-            description="Minimum tokens to clear when triggered (helps with cache optimization).",
-        )
-        CONTEXT_EDITING_TOOL_CLEAR_TOOL_INPUT: bool = Field(
-            default=False,
-            description="Also clear tool input parameters when clearing tool results.",
         )
         TOOL_RESULT_MAX_TOKENS: int = Field(
             default=50000,
@@ -3632,7 +3404,7 @@ class Pipe:
         def _walk(n):
             if isinstance(n, dict):
                 items = sorted(n.items(), key=lambda kv: (kv[0] != "type", kv[0]))
-                return {k: _walk(v) for k, v in items}
+                return {k: (v if k == "input" else _walk(v)) for k, v in items}
             if isinstance(n, list):
                 return [_walk(v) for v in n]
             return n
@@ -3684,6 +3456,10 @@ class Pipe:
                         i for i, t in enumerate(tools)
                         if isinstance(t, dict) and "cache_control" in t
                     ],
+                    "deferred": [
+                        t.get("name") for t in tools
+                        if isinstance(t, dict) and t.get("defer_loading")
+                    ],
                 }
             elif k == "messages":
                 stripped["messages"] = _walk(v)
@@ -3719,7 +3495,8 @@ class Pipe:
                 import hashlib
                 stripped = _strip_cache_control(m)
                 try:
-                    canon_ins = json.dumps(stripped, sort_keys=False, separators=(",", ":"), ensure_ascii=False,
+
+                    canon_ins = json.dumps(self._canonicalize_block(stripped), sort_keys=False, separators=(",", ":"), ensure_ascii=False,
                                            default=lambda o: repr(o))
                 except Exception:
                     canon_ins = repr(stripped)
@@ -4630,6 +4407,21 @@ class Pipe:
                 if pending_results and any(
                     isinstance(b, dict) and b.get("type") == "text" for b in blocks
                 ):
+
+                    after_client_ids = {
+                        html.unescape(a.get("tool-use-id", ""))
+                        for a in (
+                            dict(PATTERN_DATA_ATTR.findall(m.group(1)))
+                            for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(data)
+                        )
+                        if a.get("after-client") == "true"
+                    }
+                    while (
+                        blocks
+                        and blocks[0].get("type") == "server_tool_use"
+                        and blocks[0].get("id") in after_client_ids
+                    ):
+                        current_assistant.append(blocks.pop(0))
                     flush()
                 current_assistant.extend(blocks)
             else:
@@ -4643,7 +4435,7 @@ class Pipe:
                     )
                     continue
                 tc_args_raw = html.unescape(attrs.get("arguments", "") or "")
-                tc_result_raw = html.unescape(attrs.get("result", "") or "")
+                tc_result_raw = self._canonical_tool_result_text(html.unescape(attrs.get("result", "") or ""))
                 tc_done = (attrs.get("done", "true") or "true") == "true"
                 tc_error = (attrs.get("error", "false") or "false") == "true"
                 try:
@@ -4688,6 +4480,16 @@ class Pipe:
 
         flush()
         return messages
+
+    @staticmethod
+    def _canonical_tool_result_text(text: str) -> str:
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return text
+        if isinstance(parsed, str):
+            return parsed
+        return json.dumps(parsed, ensure_ascii=False)
 
     def _convert_tool_result_content(self, result_str, user=None):
         if not isinstance(result_str, str) or not result_str:
@@ -4821,6 +4623,17 @@ class Pipe:
 
         anthropic_server_tool_names = {"web_search", "web_fetch"}
 
+        native_tool_search = self._native_tool_search_active(actual_model_name, __user__)
+        owui_deferred = set((__metadata__ or {}).get("deferred_tools") or [])
+        owui_held_back: set[str] = set()
+        if owui_deferred and native_tool_search:
+            anthropic_server_tool_names = anthropic_server_tool_names | {
+                OWUI_SEARCH_TOOL_NAME,
+                OWUI_CALL_TOOL_NAME,
+            }
+        elif owui_deferred:
+            owui_held_back = owui_deferred
+
         has_run_command = bool(__tools__ and "run_command" in __tools__ and __tools__["run_command"].get("callable"))
         has_write_file = bool(__tools__ and "write_file" in __tools__ and __tools__["write_file"].get("callable"))
         has_replace_file = bool(__tools__ and "replace_file_content" in __tools__ and __tools__["replace_file_content"].get("callable"))
@@ -4854,7 +4667,8 @@ class Pipe:
                 if tool_entry.get("type") == "function":
                     func = tool_entry.get("function", {})
                     name = func.get("name")
-                    if not name or name in tool_names_seen:
+
+                    if not name or name in tool_names_seen or name.startswith("_"):
                         continue
 
                     if name in anthropic_server_tool_names:
@@ -4875,7 +4689,9 @@ class Pipe:
                     body_user_tools.append(claude_tool)
                     tool_names_seen.add(name)
 
-                    if not (__tools__ and name in __tools__ and __tools__[name].get("callable")):
+                    if name != OWUI_CALL_TOOL_NAME and not (
+                        __tools__ and name in __tools__ and __tools__[name].get("callable")
+                    ):
                         api_tool_names.add(name)
 
             claude_tools.extend(sorted(body_user_tools, key=lambda t: t["name"]))
@@ -4898,6 +4714,11 @@ class Pipe:
         web_search_enabled = self.valves.WEB_SEARCH or __metadata__.get(
             "web_search_enforced", False
         )
+        if web_search_enabled and not self.get_model_info(actual_model_name).get(
+            "supports_web_search_tool", True
+        ):
+            logger.warning(f"Web search skipped: /v1/models reports no web search tool for {actual_model_name}")
+            web_search_enabled = False
         if web_search_enabled:
 
             city = (
@@ -4965,25 +4786,34 @@ class Pipe:
             tool_names_seen.add("web_fetch")
             logger.debug(f"Added web_fetch tool: {web_fetch_type}")
 
-        if __user__["valves"].ENABLE_ADVISOR_TOOL:
-            executor_model = actual_model_name
+        normalized_model_name = self._normalize_model_name(actual_model_name)
+        if __user__["valves"].ENABLE_ADVISOR_TOOL and normalized_model_name == "claude-opus-5-5":
+            logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
+        elif __user__["valves"].ENABLE_ADVISOR_TOOL:
+            executor_model = normalized_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
             valid_advisors = {
-                "claude-haiku-4-5": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-4-6": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-5": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"],
-
-                "claude-sonnet-5-5": ["claude-opus-5-5", "claude-opus-5"],
-                "claude-opus-4-6": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-7": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-8": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-5-5": ["claude-opus-5-5", "claude-opus-5"],
-                "claude-opus-5": ["claude-opus-5-5", "claude-opus-5"],
+                "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-haiku-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+                ],
+                "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                ],
+                "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
+                "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-8": ["claude-opus-5", "claude-opus-4-8"],
+                "claude-opus-5": ["claude-opus-5"],
                 "claude-fable-5": ["claude-fable-5"],
                 "claude-mythos-5": ["claude-mythos-5"],
             }
-            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5-5", "claude-opus-5"])
+            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5"])
 
             adjusted_advisor_model = advisor_model
             if advisor_model not in allowed_advisors:
@@ -5043,6 +4873,12 @@ class Pipe:
                 if name in tool_names_seen:
                     continue
 
+                if name in anthropic_server_tool_names:
+                    continue
+
+                if name in owui_held_back:
+                    continue
+
                 if name.startswith("_"):
                     logger.debug(f"Skipping private tool: {name}")
                     continue
@@ -5073,21 +4909,24 @@ class Pipe:
 
             claude_tools.extend(sorted(user_tools, key=lambda t: t["name"]))
 
-        is_programmatic_active = False
-        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
-            model_info_ptc = self.get_model_info(actual_model_name)
-            is_programmatic_active = model_info_ptc.get("supports_programmatic_calling", False)
-
-        _defer_active = __user__["valves"].ENABLE_TOOL_SEARCH and not is_programmatic_active
+        user_excludes = normalize_tool_name_list(
+            __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
+        )
 
         for claude_tool in claude_tools:
 
-            if _defer_active:
+            if (
+                native_tool_search
+                and claude_tool.get("name") in owui_deferred
+                and claude_tool["name"] != forced_tool_name
+            ):
+                claude_tool["defer_loading"] = True
+            elif native_tool_search:
 
                 name = claude_tool["name"]
-                user_excludes = __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
                 if (
-                    name != forced_tool_name
+                    name not in api_tool_names
+                    and name != forced_tool_name
                     and name not in user_excludes
                 ):
 
@@ -5132,9 +4971,16 @@ class Pipe:
                 flags.append(f"type={t['type']}")
             if t.get("eager_input_streaming"):
                 flags.append("eager_stream")
-            logger.info(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
+            logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names
+
+    def _native_tool_search_active(self, actual_model_name: str, __user__: Dict[str, Any]) -> bool:
+        if not __user__["valves"].ENABLE_TOOL_SEARCH:
+            return False
+        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
+            return not self.get_model_info(actual_model_name).get("supports_programmatic_calling", False)
+        return True
 
     async def _get_pdf_base64_from_file_id(self, file_id: str) -> Optional[tuple[str, str]]:
         if not FILES_AVAILABLE:
@@ -5390,7 +5236,6 @@ class Pipe:
         user_id: str,
     ) -> str:
         try:
-            from anthropic import AsyncAnthropic
             import hashlib
             import io
             import uuid
@@ -5443,29 +5288,16 @@ class Pipe:
     ) -> tuple[Dict[int, List[Dict[str, Any]]], List[str]]:
         blocks_by_user_msg: Dict[int, List[Dict[str, Any]]] = {}
         processed_filenames: List[str] = []
-        status_cls = globals().get("StatusEmitter")
-        status = status_cls(__event_emitter__) if status_cls else None
+        status = StatusEmitter(__event_emitter__)
 
         async def emit_status(description: str, *, done: bool = False) -> None:
-            if status:
-                if done:
-                    await status.complete(description)
-                else:
-                    await status.activity(description)
-                return
-            await self.emit_event(
-                {"type": "status", "data": {"description": description, "done": done}},
-                __event_emitter__,
-            )
+            if done:
+                await status.complete(description)
+            else:
+                await status.activity(description)
 
         async def emit_notification(content: str, *, type: str = "warning") -> None:
-            if status and hasattr(status, "notification"):
-                await status.notification(content, type=type)
-                return
-            await self.emit_event(
-                {"type": "notification", "data": {"type": type, "content": content}},
-                __event_emitter__,
-            )
+            await status.notification(content, type=type)
 
         if not __files__:
             return blocks_by_user_msg, processed_filenames
@@ -5481,13 +5313,7 @@ class Pipe:
         user_msg_count = sum(1 for m in processed_messages if m["role"] == "user")
         current_user_msg_num = max(0, user_msg_count - 1)
 
-        client = None
-        try:
-            from anthropic import AsyncAnthropic
-            client = self._build_anthropic_client(self.valves.ANTHROPIC_API_KEY)
-        except ImportError:
-            logger.warning("Anthropic SDK not available for file upload")
-            return blocks_by_user_msg, processed_filenames
+        client = self._build_anthropic_client(self.valves.ANTHROPIC_API_KEY)
 
         for file in __files__:
 
@@ -5579,32 +5405,15 @@ class Pipe:
         if not skill_names:
             return []
 
-        status = None
-        if __event_emitter__:
-            status_cls = globals().get("StatusEmitter")
-            status = status_cls(__event_emitter__) if status_cls else None
+        status = StatusEmitter(__event_emitter__) if __event_emitter__ else None
 
         async def emit_status(description: str, *, done: bool = False, hidden: bool | None = None) -> None:
-            if not __event_emitter__:
-                return
             if status:
                 await status.emit(description, done=done, hidden=hidden)
-                return
-            data: dict[str, Any] = {"description": description, "done": done}
-            if hidden is not None:
-                data["hidden"] = hidden
-            await self.emit_event({"type": "status", "data": data}, __event_emitter__)
 
         async def emit_notification(content: str, *, type: str = "warning") -> None:
-            if not __event_emitter__:
-                return
-            if status and hasattr(status, "notification"):
+            if status:
                 await status.notification(content, type=type)
-                return
-            await self.emit_event(
-                {"type": "notification", "data": {"type": type, "content": content}},
-                __event_emitter__,
-            )
 
         if api_key not in self._validated_skills_cache:
             self._validated_skills_cache[api_key] = {}
@@ -5621,8 +5430,6 @@ class Pipe:
             await emit_status("🔧 Validating Skills...", hidden=True)
 
             try:
-                from anthropic import AsyncAnthropic
-
                 client = self._build_anthropic_client(api_key)
 
                 available_skills = {}
@@ -6073,6 +5880,12 @@ class Pipe:
                     "data": {
                         "title": f"Run tool: {name}?",
                         "message": f"The model wants to call `{name}` with:\n\n```json\n{args}\n```",
+
+                        "tool_call": {
+                            "id": tool_call_data.get("id"),
+                            "name": name,
+                            "arguments": tool_call_data.get("input") or {},
+                        },
                     },
                 }
             )
@@ -6081,7 +5894,7 @@ class Pipe:
             logger.warning("Tool approval prompt failed for '%s': %s", name, e)
             answer = False
 
-        if answer:
+        if answer is True:
             logger.info("Tool '%s' approved by user", name)
             return True, None
 
@@ -6269,6 +6082,7 @@ class Pipe:
         result_block_type: str = "",
         result_summary: str = "",
         result_display_body: str = "",
+        after_client: bool = False,
     ) -> str:
         payload = {
             "type": "server_tool_use",
@@ -6328,12 +6142,14 @@ class Pipe:
             body_src = display_body
 
         body_part = f"{body_src}\n" if body_src else ""
+        after_client_attr = ' data-after-client="true"' if after_client else ""
         return (
             f'<details type="tool_calls" done="true"'
             f' data-block-kind="server_tool_use"'
             f' data-tool-name="{html.escape(tool_name)}"'
             f' data-tool-use-id="{html.escape(tool_use_id)}"'
             f' data-payload-b64="{payload_b64}"'
+            f'{after_client_attr}'
             f'{result_attrs}>\n'
             f'<summary>{html.escape(summary_text)}</summary>\n'
             f"{body_part}"
@@ -6579,47 +6395,6 @@ class Pipe:
 
         return f"<details {attrs}>\n<summary>{summary}</summary>\n{display}\n</details>\n"
 
-    async def _emit_code_execution_source(
-        self,
-        emit_event_local: Callable,
-        code: str,
-        language: str,
-        stdout: str = "",
-        stderr: str = "",
-        return_code: int = None,
-        download_links: list = None,
-        tool_calls_info: list = None,
-    ) -> None:
-        output_parts = []
-        if stdout:
-            output_parts.append(f"stdout:\n{stdout}")
-        if stderr:
-            output_parts.append(f"stderr:\n{stderr}")
-        if return_code is not None and return_code != 0:
-            output_parts.append(f"Return code: {return_code}")
-        if download_links:
-            output_parts.append("Files:\n" + "\n".join(download_links))
-
-        output_text = "\n\n".join(output_parts) if output_parts else "(no output)"
-
-        code_preview = code[:80].replace("\n", " ").strip() + "..." if code and len(code) > 80 else (code or "").replace("\n", " ").strip()
-        source_name = f"💻 {language}: {code_preview}" if code_preview else f"💻 Code Execution ({language})"
-
-        source_data = {
-            "source": {
-                "name": source_name,
-            },
-            "document": [output_text],
-            "metadata": [
-                {
-                    "source": f"code_execution_{language}_{id(code)}",
-                    "name": source_name,
-                }
-            ],
-        }
-
-        await emit_event_local({"type": "source", "data": source_data})
-
     @staticmethod
     def _try_parse_partial_json(buffer: str):
         if not buffer or not buffer.strip():
@@ -6641,6 +6416,7 @@ class Pipe:
         thinking_types = getattr(thinking, "types", None) if thinking else None
         effort = getattr(caps, "effort", None) if caps else None
         ctx_mgmt = getattr(caps, "context_management", None) if caps else None
+        server_tools = getattr(caps, "server_tools", None) if caps else None
 
         max_tokens = getattr(model, "max_tokens", 0) or 0
         max_input = getattr(model, "max_input_tokens", 0) or 0
@@ -6658,16 +6434,26 @@ class Pipe:
             "supports_compaction": _sup(getattr(ctx_mgmt, "compact_20260112", None)) if ctx_mgmt else False,
             "supports_structured_outputs": _sup(getattr(caps, "structured_outputs", None)) if caps else False,
 
+            "supports_web_search_tool": _sup(getattr(server_tools, "web_search", None)) if server_tools else True,
+            "supports_code_execution_tool": _sup(getattr(server_tools, "code_execution", None)) if server_tools else True,
+
             "supports_memory": True,
 
             "supports_dynamic_filtering": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
-            "thinking_can_disable": True,
-            "thinking_off_type": "disabled",
-            "forced_tool_choice_unsupported": False,
-            "refusal_fallback_default_only": False,
+
+            "supports_forced_tool_choice": True,
+
+            "supports_refusal_fallback": True,
         }
+
+        if (
+            thinking_types
+            and _sup(getattr(thinking_types, "between_tools", None))
+            and not _sup(getattr(thinking_types, "disabled", None))
+        ):
+            info["thinking_off_type"] = "between_tools"
 
         model_id = model.id if hasattr(model, "id") else ""
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_id, {})
@@ -6675,18 +6461,23 @@ class Pipe:
 
         return info
 
+    @staticmethod
+    def _normalize_model_name(model_name: str) -> str:
+        return re.sub(r"-\d{8}$", "", model_name)
+
     @classmethod
     def get_model_info(cls, model_name: str) -> dict:
         if model_name in cls._api_capabilities_cache:
             return cls._api_capabilities_cache[model_name]
 
-        normalized = re.sub(r"-\d{8}$", "", model_name)
+        normalized = cls._normalize_model_name(model_name)
         if normalized != model_name and normalized in cls._api_capabilities_cache:
             return cls._api_capabilities_cache[normalized]
 
         info = {
+
             "max_tokens": cls.MODEL_MAX_TOKENS_FALLBACK.get(model_name)
-            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 4096),
+            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 64000),
             "context_length": cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(model_name)
             or cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(normalized, 200000),
             "supports_thinking": True,
@@ -6702,16 +6493,17 @@ class Pipe:
             "supports_effort_xhigh": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
-            "thinking_can_disable": True,
-            "thinking_off_type": "disabled",
-            "forced_tool_choice_unsupported": False,
-            "refusal_fallback_default_only": False,
+            "supports_forced_tool_choice": True,
+            "supports_refusal_fallback": True,
         }
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_name)
         if overrides is None:
             overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(normalized, {})
         info.update(overrides)
         return info
+
+    def _model_pricing(self) -> "ModelPricing":
+        return ModelPricing(getattr(self.valves, "MODEL_PRICING_OVERRIDES", "") or "")
 
     def _model_cache_signature(self) -> str:
         parts = [
@@ -6829,6 +6621,8 @@ class Pipe:
             for k, v in (default_headers or {}).items()
             if k.lower() != "x-api-key"
         }
+        if base_url and base_url.rstrip("/") != self._DEFAULT_API_BASE:
+            headers["x-api-key"] = api_key
         ws_id = (getattr(self.valves, "ANTHROPIC_WORKSPACE_ID", "") or "").strip()
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)
@@ -6955,19 +6749,19 @@ class Pipe:
             if task_system:
                 task_payload["system"] = task_system
 
-            logger.debug(f"Task payload: {json.dumps(task_payload, indent=2)}")
-            try:
-                logger.debug(
-                    "[PAYLOAD] task %s",
-                    json.dumps(
-                        self._strip_payload(task_payload),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                        default=str,
-                    ),
-                )
-            except Exception as _pl_err:
-                logger.debug(f"[PAYLOAD] task strip/log failed: {_pl_err}")
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    logger.debug(
+                        "[PAYLOAD] task %s",
+                        json.dumps(
+                            self._strip_payload(task_payload),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        ),
+                    )
+                except Exception as _pl_err:
+                    logger.debug(f"[PAYLOAD] task strip/log failed: {_pl_err}")
 
             api_key = self.valves.ANTHROPIC_API_KEY
             client = self._build_anthropic_client(api_key)
@@ -7094,6 +6888,17 @@ class Pipe:
         request_id = getattr(message, "id", None)
         logger.debug(f" Message started with ID: {request_id}")
 
+        transformations = getattr(message, "input_transformations", None) or []
+        if transformations:
+            reasons: dict[str, int] = {}
+            for entry in transformations:
+                reason = getattr(entry, "reason", None)
+                if reason is None and isinstance(entry, dict):
+                    reason = entry.get("reason")
+                reasons[str(reason)] = reasons.get(str(reason), 0) + 1
+            level = logging.WARNING if "prefix_binding_mismatch" in reasons else logging.INFO
+            logger.log(level, f"API dropped {len(transformations)} replayed thinking block(s): {reasons}")
+
         if not include_usage or total_usage is None:
             return stream_output_tokens
 
@@ -7115,6 +6920,17 @@ class Pipe:
 
             total_usage["cache_creation_input_tokens"] += cache_creation_input_tokens
             total_usage["cache_read_input_tokens"] += cache_read_input_tokens
+
+            breakdown = getattr(usage, "cache_creation", None)
+            write_5m = getattr(breakdown, "ephemeral_5m_input_tokens", None) if breakdown else None
+            write_1h = getattr(breakdown, "ephemeral_1h_input_tokens", None) if breakdown else None
+            if write_5m is None and write_1h is None:
+                if self.valves.CACHE_TTL == "1 hour":
+                    write_1h = cache_creation_input_tokens
+                else:
+                    write_5m = cache_creation_input_tokens
+            total_usage["_cache_write_5m"] = total_usage.get("_cache_write_5m", 0) + (write_5m or 0)
+            total_usage["_cache_write_1h"] = total_usage.get("_cache_write_1h", 0) + (write_1h or 0)
             logger.debug(
                 f" Usage stats: input={input_tokens}, output={current_output_tokens}, "
                 f"cache_creation={cache_creation_input_tokens}, cache_read={cache_read_input_tokens}"
@@ -7122,9 +6938,19 @@ class Pipe:
         else:
             cache_creation_input_tokens = 0
             cache_read_input_tokens = 0
+            write_5m = write_1h = 0
             logger.debug(f" Usage stats: input={input_tokens}, output={current_output_tokens}")
 
         total_usage["_calls"] = total_usage.get("_calls", 0) + 1
+        ModelPricing.record_call(
+            total_usage,
+            input_tokens=input_tokens or 0,
+            output_tokens=current_output_tokens or 0,
+            cache_write_5m=write_5m or 0,
+            cache_write_1h=write_1h or 0,
+            cache_read=cache_read_input_tokens,
+        )
+        ModelPricing.record_billing_modifiers(usage, total_usage)
 
         total_usage["_ctx_input"] = (
             input_tokens + cache_creation_input_tokens + cache_read_input_tokens
@@ -7281,7 +7107,13 @@ class Pipe:
             ):
                 conversation_ended = True
                 if sdk_stop == "max_tokens":
-                    await request_ctx.emit_delta("\n\n⚠️ Maximum token limit reached.")
+
+                    _cap = payload_for_stream.get("max_tokens")
+                    await request_ctx.emit_delta(
+                        "\n\n⚠️ Response cut off: the model hit its output limit"
+                        + (f" (max_tokens = {_cap:,})" if _cap else "")
+                        + ". This is not the context window — raise max_tokens for this model."
+                    )
                 elif sdk_stop == "model_context_window_exceeded":
                     await request_ctx.emit_delta("\n\n⚠️ Context window exceeded.")
                 elif sdk_stop == "refusal":
@@ -7630,38 +7462,6 @@ class Pipe:
                         else False
                     )
 
-                    skill_ids = []
-                    try:
-                        openwebui_model_id = __metadata__.get("model_id") or body.get("model", "")
-                        if openwebui_model_id and MODELS_AVAILABLE:
-                            owui_model = await Models.get_model_by_id(openwebui_model_id)
-                            if owui_model:
-
-                                meta = owui_model.meta
-                                if meta:
-                                    meta_dict = meta.model_dump() if hasattr(meta, "model_dump") else (meta if isinstance(meta, dict) else {})
-                                    model_skill_ids = set(meta_dict.get("skillIds", []))
-                                else:
-                                    model_skill_ids = set()
-                                logger.debug(f"Model {openwebui_model_id} skill IDs: {model_skill_ids}")
-                                if model_skill_ids:
-                                    from open_webui.models.skills import Skills as SkillsModel
-
-                                    user_id = __user__.get("id", "") if __user__ else ""
-                                    accessible_skills = await SkillsModel.get_skills_by_user_id(user_id, "read")
-                                    accessible = {s.id for s in accessible_skills}
-                                    logger.debug(f"Accessible skills for user: {accessible}")
-                                    skill_ids = []
-                                    for sid in model_skill_ids:
-                                        if sid not in accessible:
-                                            continue
-                                        s = await SkillsModel.get_skill_by_id(sid)
-                                        if s and s.is_active:
-                                            skill_ids.append(sid)
-                                    logger.debug(f"Resolved skill_ids: {skill_ids}")
-                    except Exception as e:
-                        logger.debug(f"Could not resolve skill IDs: {e}")
-
                     builtin_tools = get_builtin_tools(
                         __request__,
                         {
@@ -7673,10 +7473,9 @@ class Pipe:
                             "__message_id__": (
                                 __metadata__.get("message_id") if __metadata__ else None
                             ),
-                            "__skill_ids__": skill_ids,
                         },
                         features={"memory": memory_enabled},
-                        model={},
+                        model={"info": {"meta": {"builtinTools": {"skills": False}}}},
                     )
                     if inspect.isawaitable(builtin_tools):
                         builtin_tools = await builtin_tools
@@ -7698,47 +7497,41 @@ class Pipe:
                         f"After metadata merge, builtin_tools: {list(builtin_tools.keys())}"
                     )
 
-            if __tools__ and MODELS_AVAILABLE:
+            if __tools__ and MODELS_AVAILABLE and _owui_version_below((0, 10, 0)):
+                openwebui_model_id = (__metadata__ or {}).get("model_id") or body.get("model")
                 try:
-
-                    openwebui_model_id = (
-                        __metadata__.get("model_id") if __metadata__ else None
-                    )
-                    if not openwebui_model_id and body and "model" in body:
-                        openwebui_model_id = body["model"]
-
-                    if openwebui_model_id:
-                        model = await Models.get_model_by_id(openwebui_model_id)
-                        if model:
-                            params = dict(model.params or {})
-                            if params.get("function_calling") != "native":
-                                logger.debug(
-                                    f"Auto-enabling native function calling for model: {openwebui_model_id}"
-                                )
-
-                                await emit_event_local(
-                                    {
-                                        "type": "notification",
-                                        "data": {
-                                            "type": "info",
-                                            "content": f"Enabling native function calling for model: {openwebui_model_id}. Please re-run your query.",
-                                        },
-                                    }
-                                )
-
-                                params["function_calling"] = "native"
-                                form_data = model.model_dump()
-                                form_data["params"] = params
-                                await Models.update_model_by_id(
-                                    openwebui_model_id, ModelForm(**form_data)
-                                )
+                    model = Models.get_model_by_id(openwebui_model_id) if openwebui_model_id else None
+                    if inspect.isawaitable(model):
+                        model = await model
+                    params = dict(model.params or {}) if model else {}
+                    if model and params.get("function_calling") != "native":
+                        params["function_calling"] = "native"
+                        form_data = model.model_dump()
+                        form_data["params"] = params
+                        updated = Models.update_model_by_id(openwebui_model_id, ModelForm(**form_data))
+                        if inspect.isawaitable(updated):
+                            await updated
+                        await emit_event_local({
+                            "type": "notification",
+                            "data": {
+                                "type": "info",
+                                "content": f"Enabling native function calling for model: {openwebui_model_id}. Please re-run your query.",
+                            },
+                        })
                 except Exception as e:
-                    logger.warning(
-                        f"Could not auto-enable native function calling: {e}"
-                    )
+                    logger.warning(f"Could not auto-enable native function calling: {e}")
 
             if __metadata__ is not None:
                 __metadata__.setdefault("params", {})["reasoning_tags"] = False
+
+            if (
+                __metadata__
+                and __metadata__.get("deferred_tools")
+                and self._native_tool_search_active(body["model"].split("/")[-1], __user__)
+            ):
+                for msg in body.get("messages", []):
+                    if msg.get("role") == "system" and isinstance(msg.get("content"), str):
+                        msg["content"] = OWUI_TOOL_MANIFEST_RE.sub("", msg["content"])
 
             payload, headers, new_marker_metadata, api_tool_names = await self._create_payload(
                 body, __metadata__, __user__, __tools__, __event_emitter__, __files__
@@ -7772,7 +7565,6 @@ class Pipe:
                 __metadata__.get("chat_id") if __metadata__ else None
             )
 
-            token_buffer_size = getattr(self.valves, "TOKEN_BUFFER_SIZE", 1)
             max_function_calls = self.valves.MAX_TOOL_CALLS
 
             sdk_final_message = None
@@ -7806,6 +7598,7 @@ class Pipe:
                 tool_loop_iteration += 1
 
                 stream_output_tokens = 0
+                stream_web_search_requests = 0
 
                 try:
                     stream_event_counts = {}
@@ -7819,22 +7612,29 @@ class Pipe:
                     _diff_chat_id = __metadata__.get("chat_id") if __metadata__ else None
                     self._log_message_hash_diff(_diff_chat_id, payload_for_stream)
 
-                    try:
-                        logger.debug(
-                            "[PAYLOAD run=%s] iter=%d retry=%d %s",
-                            run_id,
-                            tool_loop_iteration,
-                            retry_attempts,
-                            json.dumps(
-                                self._strip_payload(payload_for_stream),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                default=str,
-                            ),
-                        )
-                    except Exception as _pl_err:
-                        logger.debug(f"[PAYLOAD] strip/log failed: {_pl_err}")
-                    async with client.beta.messages.stream(
+                    if logger.isEnabledFor(logging.DEBUG):
+                        try:
+                            logger.debug(
+                                "[PAYLOAD run=%s] iter=%d retry=%d %s",
+                                run_id,
+                                tool_loop_iteration,
+                                retry_attempts,
+                                json.dumps(
+                                    self._strip_payload(payload_for_stream),
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                    default=str,
+                                ),
+                            )
+                        except Exception as _pl_err:
+                            logger.debug(f"[PAYLOAD] strip/log failed: {_pl_err}")
+
+                    _stream_client = (
+                        client.with_options(max_retries=0)
+                        if payload_for_stream.get("speed") == "fast"
+                        else client
+                    )
+                    async with _stream_client.beta.messages.stream(
                         **payload_for_stream
                     ) as stream:
                         async for event in stream:
@@ -7911,6 +7711,18 @@ class Pipe:
                                             total_usage.get("input_tokens", 0)
                                             + total_usage.get("output_tokens", 0)
                                         )
+
+                                        server_tool_use = getattr(usage, "server_tool_use", None)
+                                        current_searches = (
+                                            getattr(server_tool_use, "web_search_requests", 0) or 0
+                                        ) if server_tool_use else 0
+                                        total_usage["_web_search_requests"] = (
+                                            total_usage.get("_web_search_requests", 0)
+                                            + (current_searches - stream_web_search_requests)
+                                        )
+                                        stream_web_search_requests = current_searches
+                                        ModelPricing.record_billing_modifiers(usage, total_usage)
+                                        ModelPricing.update_call_output(total_usage, current_output_tokens)
                                 delta = getattr(event, "delta", None)
                                 code_execution_container_id = getattr(delta, "container", None)
                                 if code_execution_container_id:
@@ -8020,6 +7832,8 @@ class Pipe:
                                                     except (TypeError, ValueError):
                                                         result_str = str(tool_result)
 
+                                                result_str = self._canonical_tool_result_text(result_str)
+
                                                 result_block = {
                                                     "type": "tool_result",
                                                     "tool_use_id": tool_use_id,
@@ -8041,7 +7855,7 @@ class Pipe:
 
                                                     completed = self._format_tool_result_block(
                                                         tool_use_id, tool_name, tool_input,
-                                                        str(tool_result), is_error=is_error, done=True,
+                                                        result_str, is_error=is_error, done=True,
                                                         files=tool_result_files,
                                                         embeds=tool_result_embeds,
                                                     )
@@ -8105,7 +7919,15 @@ class Pipe:
                                     tool_use_state.reset_for_iteration()
                                     has_pending_tool_calls = True
                                 elif stop_reason == "max_tokens":
-                                    text_state.chunk += "Claude has Reached the maximum token limit!"
+
+                                    _cap = payload_for_stream.get("max_tokens")
+                                    text_state.chunk += (
+                                        "\n\n⚠️ Response cut off: the model hit its output limit"
+                                        + (f" (max_tokens = {_cap:,})" if _cap else "")
+                                        + ". This is not the context window — raise max_tokens for this model."
+                                    )
+
+                                    conversation_ended = True
                                 elif stop_reason == "end_turn":
                                     conversation_ended = True
                                 elif stop_reason == "pause_turn":
@@ -8162,7 +7984,7 @@ class Pipe:
                                         + f"\n\nAn error occurred: {error_details}"
                                     )
 
-                            if text_state.chunk_count > token_buffer_size:
+                            if text_state.chunk_count > 1:
                                 if text_state.chunk:
                                     await emit_message_delta(text_state.chunk)
                                     text_state.chunk = ""
@@ -8444,6 +8266,63 @@ class Pipe:
 
                 except Exception as e:
 
+                    _thinking_cfg = payload_for_stream.get("thinking")
+                    if (
+                        isinstance(e, BadRequestError)
+                        and "bound to a different conversation" in str(e)
+                        and isinstance(_thinking_cfg, dict)
+                        and "block_binding" not in _thinking_cfg
+
+                        and _thinking_cfg.get("type") != "between_tools"
+                    ):
+                        logger.warning(
+                            "[THINKING-BINDING] prompt prefix changed since earlier thinking "
+                            "blocks were produced; retrying with prefix_mismatch_behavior=drop_block"
+                        )
+                        payload_for_stream["thinking"] = {
+                            **_thinking_cfg,
+                            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+                        }
+                        _betas = list(payload_for_stream.get("betas") or [])
+                        if "thinking-binding-controls-2026-08-01" not in _betas:
+                            _betas.append("thinking-binding-controls-2026-08-01")
+                        payload_for_stream["betas"] = _betas
+                        continue
+
+                    _err = str(e).lower()
+                    _tools = payload_for_stream.get("tools") or []
+                    if (
+                        isinstance(e, BadRequestError)
+                        and "not enabled" in _err
+                        and ("web fetch" in _err or "web_fetch" in _err)
+                        and any(t.get("name") == "web_fetch" for t in _tools)
+                    ):
+                        logger.warning(f"[WEB-FETCH] disabled for this organization, retrying without it: {e}")
+                        payload_for_stream["tools"] = [t for t in _tools if t.get("name") != "web_fetch"]
+                        if not payload_for_stream["tools"]:
+                            payload_for_stream.pop("tools")
+                            payload_for_stream.pop("tool_choice", None)
+                        await status.notification(
+                            "Web fetch is turned off for this Anthropic organization - "
+                            "answering without it. Turn off the WEB_FETCH valve to skip this retry.",
+                            type="warning",
+                        )
+                        continue
+
+                    if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":
+                        logger.warning(f"[FAST-MODE] 429 on fast request, falling back to standard speed: {e}")
+                        payload_for_stream.pop("speed", None)
+                        payload_for_stream["betas"] = [
+                            b for b in (payload_for_stream.get("betas") or [])
+                            if b != "fast-mode-2026-02-01"
+                        ]
+                        await status.notification(
+                            "Fast mode rate-limited or not enabled for this organization - "
+                            "falling back to standard speed.",
+                            type="warning",
+                        )
+                        continue
+
                     await _finalize_open_code_block(request_ctx)
                     server_tool_state.current_code = ""
                     should_retry, retry_attempts, response_suffix = await self._handle_stream_exception(
@@ -8484,6 +8363,12 @@ class Pipe:
             return final_text()
 
         final_status = "✅ Response Complete"
+
+        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+            cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
+            if cost_breakdown is not None:
+                total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
+                total_usage["cost_breakdown_usd"] = cost_breakdown
 
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
         if include_usage and show_token_setting != "Off" and total_usage and not is_internal:
@@ -8528,6 +8413,9 @@ class Pipe:
 
                 if billed_input:
                     final_status += f" | ⚡ {cache_read / billed_input * 100:.0f}% cached"
+
+            if "cost_usd" in total_usage:
+                final_status += f" | 💵 ≈{ModelPricing.format_usd(total_usage['cost_usd'])}"
 
         if (
             getattr(self.valves, "ENABLE_CACHE_DIAGNOSTICS", False)
@@ -8656,6 +8544,51 @@ class Pipe:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to persist usage to chat_message: {e}")
+
+        passthrough_calls = request_ctx.state.tool_use.passthrough_calls
+        if passthrough_calls and not body.get("stream", True):
+            logger.info(
+                "Returning %d passthrough tool_call(s) as an OpenAI completion object",
+                len(passthrough_calls),
+            )
+            completion: dict[str, Any] = {
+                "id": f"chatcmpl-{run_id}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": body.get("model", ""),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+
+                            "content": self._sanitize_task_text(
+                                request_ctx.state.tool_use.text_before_passthrough or ""
+                            ),
+                            "tool_calls": passthrough_calls,
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+            if include_usage and total_usage:
+                completion["usage"] = self._public_usage(total_usage)
+
+            completion["output"] = [
+                {
+                    "type": "message",
+                    "id": f"msg-{run_id}",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": completion["choices"][0]["message"]["content"],
+                        }
+                    ],
+                }
+            ]
+            return completion
 
         return final_text()
 

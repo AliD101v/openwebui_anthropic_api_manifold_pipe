@@ -24,6 +24,21 @@ class PipeStreamRuntimeSupportMethods:
         request_id = getattr(message, "id", None)
         logger.debug(f" Message started with ID: {request_id}")
 
+        # thinking-binding-controls beta: replayed thinking blocks the API
+        # dropped. prefix_binding_mismatch means our request prefix changed
+        # since the block was produced (the model answers without that
+        # reasoning and the cache restarts at the edit) - worth a warning.
+        transformations = getattr(message, "input_transformations", None) or []
+        if transformations:
+            reasons: dict[str, int] = {}
+            for entry in transformations:
+                reason = getattr(entry, "reason", None)
+                if reason is None and isinstance(entry, dict):
+                    reason = entry.get("reason")
+                reasons[str(reason)] = reasons.get(str(reason), 0) + 1
+            level = logging.WARNING if "prefix_binding_mismatch" in reasons else logging.INFO
+            logger.log(level, f"API dropped {len(transformations)} replayed thinking block(s): {reasons}")
+
         if not include_usage or total_usage is None:
             return stream_output_tokens
 
@@ -50,6 +65,21 @@ class PipeStreamRuntimeSupportMethods:
             # continuations (server tools such as web_search) and retries.
             total_usage["cache_creation_input_tokens"] += cache_creation_input_tokens
             total_usage["cache_read_input_tokens"] += cache_read_input_tokens
+            # 5m and 1h writes are billed at 1.25x and 2x respectively, so the
+            # cost estimate needs the split. The API reports it in
+            # `cache_creation`; without it, attribute the whole write to the
+            # configured TTL (loses precision only when the tools/system TTL
+            # differs from the messages TTL).
+            breakdown = getattr(usage, "cache_creation", None)
+            write_5m = getattr(breakdown, "ephemeral_5m_input_tokens", None) if breakdown else None
+            write_1h = getattr(breakdown, "ephemeral_1h_input_tokens", None) if breakdown else None
+            if write_5m is None and write_1h is None:
+                if self.valves.CACHE_TTL == "1 hour":
+                    write_1h = cache_creation_input_tokens
+                else:
+                    write_5m = cache_creation_input_tokens
+            total_usage["_cache_write_5m"] = total_usage.get("_cache_write_5m", 0) + (write_5m or 0)
+            total_usage["_cache_write_1h"] = total_usage.get("_cache_write_1h", 0) + (write_1h or 0)
             logger.debug(
                 f" Usage stats: input={input_tokens}, output={current_output_tokens}, "
                 f"cache_creation={cache_creation_input_tokens}, cache_read={cache_read_input_tokens}"
@@ -57,9 +87,19 @@ class PipeStreamRuntimeSupportMethods:
         else:
             cache_creation_input_tokens = 0
             cache_read_input_tokens = 0
+            write_5m = write_1h = 0
             logger.debug(f" Usage stats: input={input_tokens}, output={current_output_tokens}")
 
         total_usage["_calls"] = total_usage.get("_calls", 0) + 1
+        ModelPricing.record_call(
+            total_usage,
+            input_tokens=input_tokens or 0,
+            output_tokens=current_output_tokens or 0,
+            cache_write_5m=write_5m or 0,
+            cache_write_1h=write_1h or 0,
+            cache_read=cache_read_input_tokens,
+        )
+        ModelPricing.record_billing_modifiers(usage, total_usage)
 
         # Two different questions, deliberately kept apart:
         #
@@ -258,7 +298,14 @@ class PipeStreamRuntimeSupportMethods:
             ):
                 conversation_ended = True
                 if sdk_stop == "max_tokens":
-                    await request_ctx.emit_delta("\n\n⚠️ Maximum token limit reached.")
+                    # Same wording as the streaming path: this is the per-call
+                    # output ceiling, not the context window.
+                    _cap = payload_for_stream.get("max_tokens")
+                    await request_ctx.emit_delta(
+                        "\n\n⚠️ Response cut off: the model hit its output limit"
+                        + (f" (max_tokens = {_cap:,})" if _cap else "")
+                        + ". This is not the context window — raise max_tokens for this model."
+                    )
                 elif sdk_stop == "model_context_window_exceeded":
                     await request_ctx.emit_delta("\n\n⚠️ Context window exceeded.")
                 elif sdk_stop == "refusal":

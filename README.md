@@ -6,12 +6,13 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.28`
+- **Current pipe version:** `0.10.1`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
-- **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
+- **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
+- **Anthropic API version:** `2026-10-21`
 - **Model list and capabilities are fetched dynamically** from Anthropic's Models API (`max_input_tokens`, `max_tokens`, thinking/effort support, compaction support, etc.)
-- **Current Anthropic model docs focus on:** `Claude Opus 5.5`, `Claude Sonnet 5.5`, `Claude Opus 5`, `Claude Sonnet 5`, `Claude Fable 5`, `Claude Opus 4.8`, `Claude Haiku 4.5`
+- **Current Anthropic model docs focus on:** `Claude Fable 5.1`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, `Claude Haiku 5.5`
 
 This pipe targets the **Anthropic Messages API** directly through the official **Anthropic Python SDK** and keeps the OpenWebUI experience close to Anthropic-native behavior while still playing nicely with OpenWebUI models, tools, filters, files, notes, channels, and task generation.
 
@@ -50,7 +51,7 @@ This pipe targets the **Anthropic Messages API** directly through the official *
 
 1. Open **Admin Settings** → **Functions** → **+ New Function**
 2. Paste the source of [`anthropic_pipe.py`](anthropic_pipe.py) from this repo — or [`anthropic_pipe.min.py`](anthropic_pipe.min.py), the same pipe with comments and docstrings stripped (~28% smaller, quicker to paste)
-3. Repeat for the toggle filters you want to use (`anthropic_pipe_thinking_toggle.py`, `anthropic_pipe_web_search_toggle.py`, `anthropic_pipe_code_execution_toggle.py`, `anthropic_pipe_files_toggle.py`)
+3. Repeat for the toggle filters you want to use (`anthropic_pipe_thinking_toggle.py`, `anthropic_pipe_web_search_toggle.py`, `anthropic_pipe_code_execution_toggle.py`, `anthropic_pipe_files_toggle.py`, `anthropic_pipe_fast_toggle.py`)
 4. Optionally install the **Companion Filter**
 5. Set the admin valves described below
 
@@ -88,6 +89,10 @@ Recent OpenWebUI releases matter for this pipe:
 - **0.11.1**
    - human-in-the-loop tool approval, and the `ask_user` built-in tool
    - multiselect valve inputs
+- **0.11.3**
+   - OpenWebUI's own Context Compaction (Admin → Interface). When it has summarized a chat, the pipe's API-side compaction steps aside for that request
+- **0.12.3**
+   - OpenWebUI's own Tool Search (Admin → Interface) holds large tools back behind `search_tools` / `call_tool`. With `ENABLE_TOOL_SEARCH` on, Claude's native tool search replaces it; with it off, OpenWebUI's Tool Search runs and the pipe resolves `call_tool` in its tool loop
 
 If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.9.0+` moved DB/model helpers to async. The pipe is already migrated, but custom additions must also follow the async model/helper rules. See the official migration guide: https://docs.openwebui.com/features/extensibility/plugin/migration/to-0.9.0
 
@@ -103,8 +108,8 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Custom base URL / proxy (Azure, `aws-external-anthropic`, gateways) |
 | `ENABLED_MODELS` | `""` | Comma-separated model IDs to expose. Bypasses `/v1/models` auto-discovery — needed for endpoints without a models API |
 | `ANTHROPIC_WORKSPACE_ID` | `""` | Experimental: "Claude on AWS" workspace ID, sent as the `anthropic-workspace-id` header |
-| `ENABLE_FAST_MODE` | `false` | Sends Anthropic's `speed: "fast"` tier on Opus models that support it (up to ~2.5x faster, higher cost) |
-| `REFUSAL_FALLBACK` | `off` | Retry a safety-refused request server-side: `off`, `default` (Anthropic's per-category recommendation), or a pinned model. Claude API only |
+| `ENABLE_FAST_MODE` | `false` | Sends Anthropic's `speed: "fast"` tier on Opus models that support it (Opus 5.5 / 5 / 4.8; up to ~2.5x faster, higher cost). Per message: Fast Mode Toggle |
+| `REFUSAL_FALLBACK` | `off` | Retry a safety-refused request server-side: `off`, `default` (Anthropic's per-category recommendation), or a pinned model. Claude API only; skipped for Haiku 5.5, which has no server-side fallback |
 | `ENABLE_INTERLEAVED_THINKING` | `true` | Allows thinking blocks between tool calls where supported |
 | `WEB_SEARCH` | `true` | Enables Anthropic native web search |
 | `WEB_FETCH` | `true` | Enables Anthropic native URL fetch |
@@ -113,7 +118,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `CACHE_CONTROL` | `cache tools array, system prompt and messages` | Prompt caching scope (see below) |
 | `CACHE_TTL` | `5 minutes` | Anthropic cache TTL (`1 hour` is also supported, at higher write cost) |
 | `CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT` | `same as CACHE_TTL` | Separate TTL for tools array + system prompt, independent of messages. Useful for big multi-user setups |
-| `MEMORY_REVIEW_MODEL` | `claude-haiku-4-5` | Model used for OpenWebUI's background memory review (`same as chat model` to disable the override) |
+| `MEMORY_REVIEW_MODEL` | `claude-haiku-5-5` | Model used for OpenWebUI's background memory review (`same as chat model` to disable the override) |
 | `WEB_SEARCH_USER_CITY / REGION / COUNTRY / TIMEZONE` | `""` | Default search-location hints for Anthropic web search |
 | `ENABLE_PROGRAMMATIC_TOOL_CALLING` | `false` | Allows Claude to call OpenWebUI tools from inside code execution |
 | `ENABLE_BASH_TOOL` | `false` | Experimental: Claude's native `bash_20250124` tool, bridged to Open Terminal's `run_command`. Only activates when `run_command` is present in tools |
@@ -142,9 +147,9 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `ANTHROPIC_API_KEY` | `""` | Personal key override for the admin key |
-| `ENABLE_THINKING` | `false` | Enables extended thinking. On models with thinking on by default (Opus 5 / Sonnet 5 / Sonnet 5.5) turning it **off** actively disables thinking; Opus 5.5 always thinks, so the toggle cannot turn it off there |
+| `ENABLE_THINKING` | `false` | Enables extended thinking. On models with thinking on by default turning it **off** sends their lowest setting: `disabled` on Opus 5 / Sonnet 5 / Haiku 5.5, `between_tools` on Sonnet 5.5, effort `low` on Opus 5.5 (thinking cannot be turned off there) |
 | `THINKING_BUDGET_TOKENS` | `8192` | Manual thinking budget for models that still use `budget_tokens` |
-| `THINKING_DISPLAY` | `omitted` | `summarized` streams summarized thinking, `omitted` hides it for faster time-to-first-text |
+| `THINKING_DISPLAY` | `omitted` | `summarized` streams summarized thinking, `omitted` hides it for faster time-to-first-text, `updates` (beta) hides reasoning but shows the short progress updates Fable 5 / 5.1, Opus 5.5 and Sonnet 5.5 write before a tool call |
 | `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`) |
 | `HIDE_BLOCKS` | `[]` | Multiselect: block types to hide from the chat display while still replaying them to the API — `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
 | `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` (adds cache read/write tokens and call count) |
@@ -166,12 +171,12 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `ENABLE_TOOL_SEARCH` | `true` | Deferred tool loading with search for large tool sets (beta `advanced-tool-use-2025-11-20`) |
+| `ENABLE_TOOL_SEARCH` | `true` | Claude's native deferred tool loading with search for large tool sets. Wins over OpenWebUI's own Tool Search; off: OpenWebUI's Tool Search runs if enabled, otherwise no tool search |
 | `TOOL_SEARCH_TYPE` | `bm25` | Tool search mode: `bm25` or `regex` |
 | `TOOL_SEARCH_MAX_DESCRIPTION_LENGTH` | `100` | Tools with longer JSON definitions are deferred for lazy loading |
-| `TOOL_SEARCH_EXCLUDE_TOOLS` | Anthropic server tools + OpenWebUI built-ins + Open Terminal tools | Always keep these tools loaded |
+| `TOOL_SEARCH_EXCLUDE_TOOLS` | Anthropic server tools + OpenWebUI built-ins + Open Terminal tools | Multiselect: always keep these tools loaded. Tools passed in the request body are never deferred |
 | `ENABLE_ADVISOR_TOOL` | `false` | Enables the Advisor tool (beta `advisor-tool-2026-03-01`). Executor model consults a stronger advisor mid-generation for strategic guidance. Billed at the advisor's rate. |
-| `ADVISOR_MODEL` | `claude-opus-5` | Advisor model: `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5`, `claude-mythos-5` (auto-adjusted if incompatible) |
+| `ADVISOR_MODEL` | `claude-opus-5` | Advisor model: `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5-1`, `claude-fable-5`, `claude-mythos-5-1`, `claude-mythos-5` (auto-adjusted if incompatible with the executor) |
 | `ADVISOR_MAX_USES` | `0` | Max advisor calls per request (`0` = unlimited). Beyond this, further calls return `advisor_tool_result_error` with `max_uses_exceeded`. |
 | `ADVISOR_CACHING` | `off` | Ephemeral prompt caching for the advisor transcript: `off`, `5m`, or `1h` |
 
@@ -179,7 +184,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `ENABLE_COMPACTION` | `false` | Enables Anthropic API compaction where the model supports it |
+| `ENABLE_COMPACTION` | `false` | Enables Anthropic API compaction where the model supports it. Steps aside on chats OpenWebUI's own Context Compaction has already summarized |
 | `COMPACTION_TRIGGER_TOKENS` | `50000` | Token threshold that triggers compaction |
 | `COMPACTION_INSTRUCTIONS` | `""` | Optional custom compaction prompt |
 | `CONTEXT_EDITING_STRATEGY` | `none` | `none`, `clear_tool_results`, `clear_thinking`, `clear_both` |
@@ -191,11 +196,10 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 ### Important behavior notes
 
-- The pipe automatically prefers **adaptive thinking** whenever the model advertises it (Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Opus 4.8/4.7/4.6, Sonnet 4.6).
+- The pipe automatically prefers **adaptive thinking** whenever the model advertises it (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5, Sonnet 5, Opus 4.8/4.7/4.6, Sonnet 4.6).
 - Anthropic recommends **`effort`** as the main control for adaptive-thinking models. Effort levels are clamped per model from the Models API, so unsupported values (`xhigh`, `max`) degrade instead of erroring.
-- On **Opus 5 / Sonnet 5**, thinking is **on by default**. Switching `ENABLE_THINKING` off sends `thinking: {"type": "disabled"}` and clamps effort to `high`, because Opus 5 rejects disabled thinking at `xhigh`/`max`.
-- **Sonnet 5.5** rejects `disabled`, so switching `ENABLE_THINKING` off sends `thinking: {"type": "between_tools"}` (its lowest thinking setting) and clamps effort to `high`. **Opus 5.5** always thinks: `disabled` is a 400 at every effort level, so the toggle has no off state there — lower `EFFORT` instead. Its API default effort is `medium`, but the pipe always sends your `EFFORT` value.
-- **Opus 5.5 / Sonnet 5.5** reject forced tool use, so Web Search Enforcement and forced OpenWebUI `tool_choice` values are sent as `auto`: `web_search` stays available but the model is not forced to call it.
+- On **Opus 5 / Sonnet 5 / Haiku 5.5**, thinking is **on by default**. Switching `ENABLE_THINKING` off sends `thinking: {"type": "disabled"}` and clamps effort to `high`, because disabled thinking is rejected at `xhigh`/`max`. **Sonnet 5.5** rejects `disabled`; it gets `thinking: {"type": "between_tools"}` (no up-front thinking) with the same clamp. **Opus 5.5** always thinks, so "off" lowers effort to `low`.
+- **Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1** reject forced `tool_choice` (`tool` / `any`). The pipe degrades it to `auto` on those models instead of failing the request.
 - `THINKING_DISPLAY="omitted"` suppresses streamed `thinking_delta` events, matching Anthropic's streaming behavior.
 - `USE_FILES_API` **overrides** native PDF upload. If enabled, the pipe uploads files to Anthropic and injects `container_upload` blocks at the correct message positions.
 - Anthropic's **Files API** supports create-once / use-many flows, but remains **beta**.
@@ -226,18 +230,95 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 | **Web Search Toggle** | One-shot web-search forcing for the next message |
 | **Code Execution Toggle** | One-shot code-execution enable for the next message |
 | **Files API Toggle** | One-shot Files API mode for file-heavy / skill-heavy flows |
+| **Fast Mode Toggle** | One-shot fast mode for the next message (Opus 5.5 / 5 / 4.8; ignored on other models) |
 | **Companion Filter** | Routes OpenWebUI's built-in `web_search` / `code_interpreter` UI actions to Anthropic-native tools |
 
 ---
 
 ## 📝 Recent pipe changes
+### `v0.10.1`
+- OpenWebUI Tool Search with `ENABLE_TOOL_SEARCH` on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text
+- `ENABLE_TOOL_SEARCH` off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search
+
+### `v0.10.0`
+- API version `2026-10-21` and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe)
+- `temperature` / `top_p` / `top_k` from model params are no longer sent. `2026-10-21` rejects them on every model, and with SDK 1.9+ they already failed with a `TypeError` on Haiku 4.5, Sonnet 4.5 and Opus 4.5
+- SDK 2.x authenticates with `Authorization: Bearer`. A custom `ANTHROPIC_BASE_URL` (proxy, gateway) also gets the key as `x-api-key`, so gateways that read only that header keep working
+- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it
+- `/v1/models`: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (`disabled` or `between_tools`)
+- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400
+
+### `v0.9.39`
+- Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on
+- Prompt cache kept for tool calls with two or more arguments (e.g. tool search's `query` + `limit`): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: `messages_changed`)
+- A server tool the model calls right after a client tool in the same response (e.g. `bash` after `view_knowledge_file`) stays in that assistant message on replay instead of moving into the next one
+- Tool search: the system hint now names the deferred tools (sorted, changes only with the tool set). Without the names the model answered "use the weather tool" with web search instead of searching for the deferred tool
+- Open Terminal plus code execution in one request: a system hint tells the model that only the terminal tools reach the user's terminal. Asked to run a command in the terminal, it used Anthropic's isolated code execution sandbox instead
+- `CACHE-DIFF` debug log no longer reports block key-order differences as breaks (the API ignores them; only tool `input` order counts). The `[PAYLOAD]` log line lists deferred tools
+
+### `v0.9.38`
+- Estimated USD cost per turn (new `SHOW_COST` user valve, contributed by Willian-Zhang in #49): `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage (message info tooltip, persisted for analytics) and appended to the `SHOW_TOKEN_COUNT` status line. Prices come from a built-in list-price table (verified 2026-10-13); admins patch it via the `MODEL_PRICING_OVERRIDES` valve (JSON, USD per MTok)
+- The estimate follows the bill: cache writes split 5m/1h, fast mode, Haiku 5.5's prompt-length tier and US data residency priced per API call from the response usage, web searches at $10 per 1,000
+
+### `v0.9.37`
+- Removed the beta headers of features Anthropic made generally available (effort, code execution 20250825, web fetch 20250910, tool search / programmatic tool calling, prompt caching); verified live without them
+- Removed context editing (`CONTEXT_EDITING_*` user valves): off by default, and it invalidated the prompt cache whenever it cleared. Compaction stays
+
+### `v0.9.36`
+- OpenWebUI < 0.10 only: the auto-switch to native function calling is back, gated on the running version. From 0.10 on an unset `function_calling` already means native, so the pipe no longer rewrites model rows there or overrides an explicit "legacy"
+
+### `v0.9.35`
+- Removed the native-function-calling auto-switch for OpenWebUI 0.12, where it rewrote every model row without the param, showed a "re-run your query" toast and overrode "legacy" (restored for < 0.10 in v0.9.36)
+- `web_search` enforcement (`tool_choice`) no longer depends on any beta header being sent; with caching and all betas off it was silently skipped
+- Dead code removed (unused helpers, SDK < 0.121 shims, fallback emitters); payload/task JSON dumps only serialize at DEBUG; per-tool log lines moved to DEBUG
+
+### `v0.9.34`
+- OpenWebUI 0.12 Tool Search: tools OpenWebUI holds back are sent with native `defer_loading` (Claude's tool search); OpenWebUI's `search_tools` and its `<available_tools>` manifest are dropped
+- Tool approval uses OpenWebUI 0.12's native Tool Permissions dialog (`tool_call` in the confirmation event). Only an explicit allow approves; a timed-out or closed dialog no longer counts as approval
+- Private tool helpers (names starting with `_`) stored in a tool's specs are no longer sent to the model
+- Removed the dead skill-id resolution; skill tools come from OpenWebUI, gated by the model's Builtin Tools > Skills switch
+
+### `v0.9.33`
+- Fast mode falls back to standard speed on a `429`. Fast requests are sent without SDK retries; when fast mode is rate-limited (or not enabled for your organization: fast mode is a research preview, limit `0`), the turn is retried at standard speed and a warning notification says so, instead of failing with "Rate limit exceeded" after several backoffs. The fallback costs one prompt-cache miss, since fast and standard requests share no cached prefix
+
+### `v0.9.32`
+- Fixed the per-message **Fast Mode Toggle** not sending the `fast-mode-2026-02-01` beta header when the admin valve `ENABLE_FAST_MODE` is off (#52)
+- Fixed the Opus-5.5 advisor skip and the executor→advisor fallback lookup missing dated model ids. Endpoints that serve dated aliases (e.g. `claude-opus-5-5-20260215` from Azure/custom proxies) slipped past the literal `claude-opus-5-5` check, which re-enabled the advisor tool on an executor that has no valid pair and 400'd the request. Both paths now normalize the id (strip the `-YYYYMMDD` suffix) through the same helper `get_model_info` uses
+
+### `v0.9.31`
+- Added **Claude Sonnet 5.5** (`claude-sonnet-5-5`): 1M context, 128k output, adaptive thinking on by default, full effort ladder including `max`
+- Sonnet 5.5 rejects `thinking: {"type": "disabled"}`. The Thinking Toggle / `ENABLE_THINKING=off` now sends its lowest setting there, `thinking: {"type": "between_tools"}`: no up-front thinking, while the notes between tool calls still arrive as thinking blocks. Like the Opus 5 disable, it is capped at effort `high`
+- Sonnet 5.5 rejects forced `tool_choice` (`tool` / `any`); it is degraded to `auto`, as on Opus 5.5 / Fable 5.1
+- Added **Claude Haiku 5.5** (`claude-haiku-5-5`): 1M context, 128k output, adaptive thinking on by default, full effort ladder including `max`. Thinking off sends `thinking: {"type": "disabled"}` (capped at effort `high`); forced `tool_choice` keeps working
+- Haiku 5.5 has no server-side refusal fallback, and a pinned fallback model returns a 400, so `REFUSAL_FALLBACK` is skipped for it
+- Advisor pairs for Sonnet 5.5 and Haiku 5.5 executors; Opus 5.5 is now selectable as `ADVISOR_MODEL`
+- `MEMORY_REVIEW_MODEL` now defaults to Haiku 5.5, at about a tenth of Haiku 4.5's price. Sonnet 5.5 is selectable there as well, and as a `REFUSAL_FALLBACK` target
+- The `drop_block` retry for changed prompt prefixes is skipped for `between_tools` requests, which accept no other thinking field
+
+### `v0.9.30`
+- Added **Claude Opus 5.5** (`claude-opus-5-5`): 1M context, 128k output, always-on adaptive thinking, full effort ladder including `max`, fast mode
+- Opus 5.5 rejects `thinking: {"type": "disabled"}`: the Thinking Toggle / `ENABLE_THINKING=off` lowers effort to `low` there instead of disabling thinking
+- Opus 5.5 rejects forced `tool_choice` (`tool` / `any`); it is degraded to `auto`, as on Fable 5.1
+- `thinking.block_binding` `"drop_block"` is no longer sent up front. On accounts created before 2026-08-31 it opted every request in to the prefix check and dropped thinking blocks the model could otherwise still read. Newer accounts get a 400 for a changed prefix instead; the pipe retries that request once with `drop_block`, so the turn still goes through
+- `THINKING_DISPLAY="updates"` also covers Opus 5.5, where the notes between tool calls arrive as thinking blocks and stay empty at `omitted`. Its beta header is sent whenever `updates` is used
+- Opus 5.5 is not a valid advisor executor yet: the advisor tool is skipped on that model instead of failing the request
+
+### `v0.9.29`
+- Added **Claude Fable 5.1 / Mythos 5.1**: 128k output, 1M context, adaptive thinking, compaction, structured outputs, and selectable as advisor models
+- Forced `tool_choice` (`tool` / `any`) is no longer sent to models that reject it: Fable 5.1 and Mythos 5.1 return a 400 for forced tool use, so web-search enforcement and a forced `tool_choice` from the request body degrade to `auto` on them (logged)
+- Thinking blocks replayed to Fable 5.1 are bound to the request prefix (system, tools, earlier messages). OpenWebUI changes that prefix between turns (memory/RAG appendix, tool toggles, context compaction summary); the pipe now handles a prefix mismatch instead of surfacing a 400
+- `THINKING_DISPLAY` accepts `updates` (beta): reasoning stays hidden, the one-line progress updates Fable 5 / 5.1 write before a tool call are shown as thinking text
+- `ENABLE_COMPACTION` steps aside when OpenWebUI's own Context Compaction (`0.11.3+`) has already summarized the chat, so the two never run on the same conversation
+
 ### `v0.9.28`
-- Added **Claude Opus 5.5** (`claude-opus-5-5`): 1M context, 128k output, fast mode, compaction, dynamic filtering. Thinking is always on: `thinking: {"type": "disabled"}` is a 400 at every effort level, so the Thinking Toggle never sends it for this model and only decides whether an explicit adaptive `thinking` block (with `display`) is sent
-- Added **Claude Sonnet 5.5** (`claude-sonnet-5-5`): 1M context, 128k output, compaction, dynamic filtering. `thinking: {"type": "disabled"}` is a 400 here too, so turning the Thinking Toggle off now sends `thinking: {"type": "between_tools"}` (the lowest thinking setting). Like disabled on Opus 5 it is only accepted up to effort `high`, so `xhigh`/`max` are clamped to `high`
-- Forced `tool_choice` (`any` / `tool`) is a 400 on both 5.5 models: Web Search Enforcement and OpenWebUI's `required` / function `tool_choice` now go out as `auto`. `web_search` is still offered, the model just isn't forced to call it
-- `REFUSAL_FALLBACK` on Sonnet 5.5 always uses Anthropic's per-category `default` routing, even when a pinned fallback model is selected: only the `default` form is accepted for that model
-- Advisor: Opus 5.5 is now a selectable advisor and both 5.5 models have executor/advisor pairings. Sonnet 5.5 rejects Opus 4.8 / 4.7 / 4.6 and Sonnet 5 advisors (400), so the advisor is upgraded to Opus 5.5 for that executor
-- The memory-review model list knows about Opus 5.5 and Sonnet 5.5
+- Fixed every tool being deferred for tool search regardless of the exclude list: the `TOOL_SEARCH_EXCLUDE_TOOLS` default shipped as one comma-separated blob inside a one-element list, so nothing ever matched. Server tools and even `tool_search` itself were deferred, which proxies without deferred loading (litellm, Bedrock) answered with a 400 (#44, reported by @icsy7867)
+- `TOOL_SEARCH_EXCLUDE_TOOLS` is now a multiselect with a real list default; comma-separated and legacy blob values still load
+- Raised the `max_tokens` fallback for unrecognised model ids from 4096 to 64000. Proxies that rename models (`us.anthropic.claude-sonnet-5-v1:0`) missed the lookup table and truncated long answers (#43, reported by @icsy7867)
+- The truncation notice now names the actual output limit instead of suggesting a full context window
+- Fixed a truncated answer being retried up to `MAX_RETRIES` times: `stop_reason: "max_tokens"` fell through to the truncated-stream retry, and each attempt was billed
+- Non-streaming requests that carry their own `tools` now return a real OpenAI `tool_calls` array with `finish_reason: "tool_calls"` instead of the arguments serialized into `message.content` (#35, reported by @kdo-jl)
+- Tools passed in `body.tools` are no longer deferred for tool search; the caller runs them itself (#35)
+- Added a **Fast Mode Toggle** filter (`anthropic_pipe_fast_toggle.py`) for per-message fast requests, next to the admin valve. It is ignored on models without fast mode (#50, requested by @Willian-Zhang)
 
 ### `v0.9.27`
 - Fixed a follow-up request failing with `tool use found without a corresponding tool_result block` after a turn with several Anthropic-hosted code-execution calls. The stored carriers interleave once server tools run in quick succession, and replaying them in document order separated a `server_tool_use` from its result. Results are now pulled forward so the pair stays adjacent (#40, by @JaWoDigiB)
