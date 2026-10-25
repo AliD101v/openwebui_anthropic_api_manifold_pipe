@@ -62,6 +62,12 @@ async def create_request_payload(
     # Effort works differently based on model capabilities
     effort_config = None
     effective_effort = None
+    # The user's static EFFORT valve, independent of any per-message
+    # `reasoning_effort` override. This is what the top-level `output_config`
+    # stays pinned to across a conversation (see the mid-conversation-effort
+    # block below) -- a per-message deviation from it is what the beta
+    # per-message effort message exists for.
+    baseline_effort = None
 
     if model_info["supports_effort"]:
         # Clamp an effort value to what the current model supports.
@@ -75,11 +81,12 @@ async def create_request_payload(
                 return "high"
             return value
 
+        baseline_effort = _clamp_effort(__user__["valves"].EFFORT)
         body_effort = body.get("reasoning_effort")
         if body_effort in ("low", "medium", "high", "xhigh", "max"):
             effective_effort = _clamp_effort(body_effort)
         else:
-            effective_effort = _clamp_effort(__user__["valves"].EFFORT)
+            effective_effort = baseline_effort
 
         effort_config = {"effort": effective_effort}
         logger.debug(f"Effort level set to: {effective_effort}")
@@ -98,6 +105,7 @@ async def create_request_payload(
             )
             effective_effort = "low"
             effort_config = {"effort": "low"}
+            baseline_effort = "low"
         enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
         # Opus 4.6 (supports adaptive thinking) uses effort as the control
@@ -157,6 +165,8 @@ async def create_request_payload(
             )
             effective_effort = "high"
             effort_config = {"effort": "high"}
+        if baseline_effort in ("xhigh", "max"):
+            baseline_effort = "high"
 
     raw_messages = body.get("messages", []) or []
 
@@ -502,7 +512,58 @@ async def create_request_payload(
         payload["context_management"]["edits"].append(compact_edit)
 
     if model_info["supports_effort"] and effort_config:
-        payload["output_config"] = effort_config
+        # OpenWebUI's reasoning_effort is a per-message control, so a top-level
+        # output_config change on every turn it differs from the user's static
+        # EFFORT valve would otherwise invalidate the whole prompt cache. On
+        # models that support it, keep the top-level value pinned to the
+        # baseline and carry a deviation as an effort-only mid-conversation
+        # message instead -- it takes effect from the next user turn without
+        # touching the cached prefix. Needs adaptive thinking, and is only
+        # meaningful once there is history to protect.
+        use_mid_conversation_effort = (
+            model_info.get("supports_mid_conversation_effort", False)
+            and effective_effort != baseline_effort
+            and len(processed_messages) > 1
+            and (payload.get("thinking") or {}).get("type") == "adaptive"
+        )
+        if use_mid_conversation_effort:
+            payload["output_config"] = {"effort": baseline_effort}
+            # Exempt from mid-conversation system message placement rules (no
+            # text content) -- inserted right before the upcoming user turn so
+            # "the next user turn" the API refers to is this request's.
+            processed_messages.insert(
+                len(processed_messages) - 1,
+                {
+                    "role": "system",
+                    "content": [],
+                    "output_config": {"effort": effective_effort},
+                },
+            )
+            if "mid-conversation-output-config-2026-07-01" not in beta_headers:
+                beta_headers.append("mid-conversation-output-config-2026-07-01")
+            logger.debug(
+                f"Per-message effort override: baseline '{baseline_effort}' -> "
+                f"'{effective_effort}' via mid-conversation-output-config (cache-preserving)"
+            )
+        else:
+            payload["output_config"] = effort_config
+
+    # Task Budgets (beta): an advisory token ceiling for a full agentic loop --
+    # the model sees a running countdown and paces itself, distinct from the
+    # hard `max_tokens` cap it isn't aware of. Opt-in, admin/user-configured
+    # only (TASK_BUDGET_TOKENS valve, 0 = disabled): the right total depends on
+    # the task, never guessed here. The orchestrator fills in `remaining` on
+    # later tool loop iterations since this pipe resends full history on every
+    # request rather than keeping one open stream.
+    task_budget_total = getattr(__user__["valves"], "TASK_BUDGET_TOKENS", 0) or 0
+    if task_budget_total and model_info.get("supports_task_budget", False):
+        payload.setdefault("output_config", {})["task_budget"] = {
+            "type": "tokens",
+            "total": task_budget_total,
+        }
+        if "task-budgets-2026-03-13" not in beta_headers:
+            beta_headers.append("task-budgets-2026-03-13")
+        logger.debug(f"Task budget enabled: total={task_budget_total}")
 
     # Add Fast Mode beta header whenever the request actually asks for fast
     # speed. Bind to payload["speed"] -- set above from the valve OR the

@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.1
+version: 0.10.2
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -35,8 +35,14 @@ Supports:
 - Fast Mode for Opus 5.5 / 5 / 4.8
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
+- Per-message Effort override that preserves the prompt cache
+- Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.2
+- Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
+- Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on.
+
 v0.10.1
 - OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
 - ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
@@ -829,6 +835,9 @@ class Pipe:
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
             "supports_forced_tool_choice": False,
+            # Per-message effort (beta mid-conversation-output-config-2026-07-01).
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-mythos-5-1": {
             "supports_dynamic_filtering": True,
@@ -836,12 +845,15 @@ class Pipe:
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
             "supports_forced_tool_choice": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
          "claude-fable-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            "supports_task_budget": True,
         },
          # Deliberately identical to claude-fable-5, its sibling: no account we
          # can query is entitled to Mythos, so its capabilities cannot be read
@@ -852,6 +864,7 @@ class Pipe:
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            "supports_task_budget": True,
         },
         # No capability fixups of their own, but they still need the structured
         # outputs pin: task requests fire on a freshly loaded Pipe whose API
@@ -882,6 +895,8 @@ class Pipe:
             "thinking_always_on": True,
             # tool_choice "tool" / "any" 400 on this model; only auto / none.
             "supports_forced_tool_choice": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
@@ -894,6 +909,8 @@ class Pipe:
             # Opus 5 runs with thinking ON unless thinking:{"type":"disabled"}
             # is sent explicitly. Disabling is rejected at effort xhigh/max.
             "thinking_on_by_default": True,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-sonnet-5-5": {
             "supports_dynamic_filtering": True,
@@ -910,6 +927,8 @@ class Pipe:
             "thinking_off_type": "between_tools",
             # tool_choice "tool" / "any" 400 on this model; only auto / none.
             "supports_forced_tool_choice": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-sonnet-5": {
             "supports_dynamic_filtering": True,
@@ -933,6 +952,8 @@ class Pipe:
             # No server-side fallback: "default" stays declined and a pinned
             # fallback model 400s.
             "supports_refusal_fallback": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
@@ -941,6 +962,7 @@ class Pipe:
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            "supports_task_budget": True,
         },
         "claude-opus-4-7": {
             "supports_dynamic_filtering": True,
@@ -950,6 +972,8 @@ class Pipe:
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            # Task Budgets shipped with Opus 4.7 (token-counting shift offset).
+            "supports_task_budget": True,
         },
         "claude-opus-4-6": {
             "supports_dynamic_filtering": True,
@@ -1201,6 +1225,26 @@ class Pipe:
             default="high",
             description="How much effort should be applied to answer the next requestEffort level for this user. Also controllable via OpenWebUI's reasoning_effort parameter.",
         )
+        TASK_BUDGET_TOKENS: int = Field(
+            default=0,
+            ge=0,
+            le=1000000,
+            description="Advisory token ceiling (beta Task Budgets) for a full agentic turn, including "
+            "tool calls across the tool loop. The model sees a running countdown and paces itself to "
+            "finish gracefully instead of being cut off -- distinct from the hard max_tokens cap, which "
+            "it is not aware of. 0 disables it. Non-zero values below 20000 (Anthropic's minimum) are "
+            "raised to 20000. Only supported models get it; others ignore this valve. Pick a value you "
+            "have measured for the task -- a budget that is too tight makes the model cut corners.",
+        )
+
+        @field_validator("TASK_BUDGET_TOKENS")
+        @classmethod
+        def _clamp_task_budget_tokens(cls, v: int) -> int:
+            """0 means disabled; any other value must meet Anthropic's 20k floor."""
+            if v and v < 20000:
+                return 20000
+            return v
+
         USE_PDF_NATIVE_UPLOAD: bool = Field(
             default=True,
             description="Upload PDFs as native base64 documents instead of RAG text extraction. Only applies to 'Use Full Document' mode.",

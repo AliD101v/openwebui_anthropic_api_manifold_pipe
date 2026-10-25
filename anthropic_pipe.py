@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.1
+version: 0.10.2
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -35,8 +35,14 @@ Supports:
 - Fast Mode for Opus 5.5 / 5 / 4.8
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
+- Per-message Effort override that preserves the prompt cache
+- Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.2
+- Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
+- Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on.
+
 v0.10.1
 - OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
 - ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
@@ -892,6 +898,12 @@ async def create_request_payload(
     # Effort works differently based on model capabilities
     effort_config = None
     effective_effort = None
+    # The user's static EFFORT valve, independent of any per-message
+    # `reasoning_effort` override. This is what the top-level `output_config`
+    # stays pinned to across a conversation (see the mid-conversation-effort
+    # block below) -- a per-message deviation from it is what the beta
+    # per-message effort message exists for.
+    baseline_effort = None
 
     if model_info["supports_effort"]:
         # Clamp an effort value to what the current model supports.
@@ -904,11 +916,12 @@ async def create_request_payload(
                 return "high"
             return value
 
+        baseline_effort = _clamp_effort(__user__["valves"].EFFORT)
         body_effort = body.get("reasoning_effort")
         if body_effort in ("low", "medium", "high", "xhigh", "max"):
             effective_effort = _clamp_effort(body_effort)
         else:
-            effective_effort = _clamp_effort(__user__["valves"].EFFORT)
+            effective_effort = baseline_effort
 
         effort_config = {"effort": effective_effort}
         logger.debug(f"Effort level set to: {effective_effort}")
@@ -927,6 +940,7 @@ async def create_request_payload(
             )
             effective_effort = "low"
             effort_config = {"effort": "low"}
+            baseline_effort = "low"
         enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
         # Opus 4.6 (supports adaptive thinking) uses effort as the control
@@ -986,6 +1000,8 @@ async def create_request_payload(
             )
             effective_effort = "high"
             effort_config = {"effort": "high"}
+        if baseline_effort in ("xhigh", "max"):
+            baseline_effort = "high"
 
     raw_messages = body.get("messages", []) or []
 
@@ -1331,7 +1347,58 @@ async def create_request_payload(
         payload["context_management"]["edits"].append(compact_edit)
 
     if model_info["supports_effort"] and effort_config:
-        payload["output_config"] = effort_config
+        # OpenWebUI's reasoning_effort is a per-message control, so a top-level
+        # output_config change on every turn it differs from the user's static
+        # EFFORT valve would otherwise invalidate the whole prompt cache. On
+        # models that support it, keep the top-level value pinned to the
+        # baseline and carry a deviation as an effort-only mid-conversation
+        # message instead -- it takes effect from the next user turn without
+        # touching the cached prefix. Needs adaptive thinking, and is only
+        # meaningful once there is history to protect.
+        use_mid_conversation_effort = (
+            model_info.get("supports_mid_conversation_effort", False)
+            and effective_effort != baseline_effort
+            and len(processed_messages) > 1
+            and (payload.get("thinking") or {}).get("type") == "adaptive"
+        )
+        if use_mid_conversation_effort:
+            payload["output_config"] = {"effort": baseline_effort}
+            # Exempt from mid-conversation system message placement rules (no
+            # text content) -- inserted right before the upcoming user turn so
+            # "the next user turn" the API refers to is this request's.
+            processed_messages.insert(
+                len(processed_messages) - 1,
+                {
+                    "role": "system",
+                    "content": [],
+                    "output_config": {"effort": effective_effort},
+                },
+            )
+            if "mid-conversation-output-config-2026-07-01" not in beta_headers:
+                beta_headers.append("mid-conversation-output-config-2026-07-01")
+            logger.debug(
+                f"Per-message effort override: baseline '{baseline_effort}' -> "
+                f"'{effective_effort}' via mid-conversation-output-config (cache-preserving)"
+            )
+        else:
+            payload["output_config"] = effort_config
+
+    # Task Budgets (beta): an advisory token ceiling for a full agentic loop --
+    # the model sees a running countdown and paces itself, distinct from the
+    # hard `max_tokens` cap it isn't aware of. Opt-in, admin/user-configured
+    # only (TASK_BUDGET_TOKENS valve, 0 = disabled): the right total depends on
+    # the task, never guessed here. The orchestrator fills in `remaining` on
+    # later tool loop iterations since this pipe resends full history on every
+    # request rather than keeping one open stream.
+    task_budget_total = getattr(__user__["valves"], "TASK_BUDGET_TOKENS", 0) or 0
+    if task_budget_total and model_info.get("supports_task_budget", False):
+        payload.setdefault("output_config", {})["task_budget"] = {
+            "type": "tokens",
+            "total": task_budget_total,
+        }
+        if "task-budgets-2026-03-13" not in beta_headers:
+            beta_headers.append("task-budgets-2026-03-13")
+        logger.debug(f"Task budget enabled: total={task_budget_total}")
 
     # Add Fast Mode beta header whenever the request actually asks for fast
     # speed. Bind to payload["speed"] -- set above from the valve OR the
@@ -3407,6 +3474,9 @@ class Pipe:
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
             "supports_forced_tool_choice": False,
+            # Per-message effort (beta mid-conversation-output-config-2026-07-01).
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-mythos-5-1": {
             "supports_dynamic_filtering": True,
@@ -3414,12 +3484,15 @@ class Pipe:
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
             "supports_forced_tool_choice": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
          "claude-fable-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            "supports_task_budget": True,
         },
          # Deliberately identical to claude-fable-5, its sibling: no account we
          # can query is entitled to Mythos, so its capabilities cannot be read
@@ -3430,6 +3503,7 @@ class Pipe:
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            "supports_task_budget": True,
         },
         # No capability fixups of their own, but they still need the structured
         # outputs pin: task requests fire on a freshly loaded Pipe whose API
@@ -3460,6 +3534,8 @@ class Pipe:
             "thinking_always_on": True,
             # tool_choice "tool" / "any" 400 on this model; only auto / none.
             "supports_forced_tool_choice": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
@@ -3472,6 +3548,8 @@ class Pipe:
             # Opus 5 runs with thinking ON unless thinking:{"type":"disabled"}
             # is sent explicitly. Disabling is rejected at effort xhigh/max.
             "thinking_on_by_default": True,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-sonnet-5-5": {
             "supports_dynamic_filtering": True,
@@ -3488,6 +3566,8 @@ class Pipe:
             "thinking_off_type": "between_tools",
             # tool_choice "tool" / "any" 400 on this model; only auto / none.
             "supports_forced_tool_choice": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-sonnet-5": {
             "supports_dynamic_filtering": True,
@@ -3511,6 +3591,8 @@ class Pipe:
             # No server-side fallback: "default" stays declined and a pinned
             # fallback model 400s.
             "supports_refusal_fallback": False,
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
@@ -3519,6 +3601,7 @@ class Pipe:
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            "supports_task_budget": True,
         },
         "claude-opus-4-7": {
             "supports_dynamic_filtering": True,
@@ -3528,6 +3611,8 @@ class Pipe:
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
+            # Task Budgets shipped with Opus 4.7 (token-counting shift offset).
+            "supports_task_budget": True,
         },
         "claude-opus-4-6": {
             "supports_dynamic_filtering": True,
@@ -3779,6 +3864,26 @@ class Pipe:
             default="high",
             description="How much effort should be applied to answer the next requestEffort level for this user. Also controllable via OpenWebUI's reasoning_effort parameter.",
         )
+        TASK_BUDGET_TOKENS: int = Field(
+            default=0,
+            ge=0,
+            le=1000000,
+            description="Advisory token ceiling (beta Task Budgets) for a full agentic turn, including "
+            "tool calls across the tool loop. The model sees a running countdown and paces itself to "
+            "finish gracefully instead of being cut off -- distinct from the hard max_tokens cap, which "
+            "it is not aware of. 0 disables it. Non-zero values below 20000 (Anthropic's minimum) are "
+            "raised to 20000. Only supported models get it; others ignore this valve. Pick a value you "
+            "have measured for the task -- a budget that is too tight makes the model cut corners.",
+        )
+
+        @field_validator("TASK_BUDGET_TOKENS")
+        @classmethod
+        def _clamp_task_budget_tokens(cls, v: int) -> int:
+            """0 means disabled; any other value must meet Anthropic's 20k floor."""
+            if v and v < 20000:
+                return 20000
+            return v
+
         USE_PDF_NATIVE_UPLOAD: bool = Field(
             default=True,
             description="Upload PDFs as native base64 documents instead of RAG text extraction. Only applies to 'Use Full Document' mode.",
@@ -9453,6 +9558,17 @@ class Pipe:
             retry_attempts = 0
             current_function_calls = 0
 
+            # Task Budgets (beta): `total` is fixed for the whole turn; `remaining`
+            # is this pipe's own bookkeeping, not the server's. Every tool loop
+            # iteration is a brand-new request replaying full history (no open
+            # session the server can track spend against), so starting with
+            # iteration 2 the countdown is carried forward by hand from the
+            # output tokens the previous iterations actually generated.
+            task_budget_total = (
+                (payload_for_stream.get("output_config") or {}).get("task_budget") or {}
+            ).get("total", 0)
+            task_budget_spent = 0
+
             await status.waiting()
 
             # =========================================================================
@@ -9469,6 +9585,17 @@ class Pipe:
                 # Reset per-iteration state
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
+
+                if task_budget_total and tool_loop_iteration > 1:
+                    # First iteration sends `total` alone (server defaults
+                    # remaining to it); later ones report what this loop has
+                    # already spent so the countdown keeps decreasing instead
+                    # of resetting on every freshly-resent request.
+                    payload_for_stream.setdefault("output_config", {})["task_budget"] = {
+                        "type": "tokens",
+                        "total": task_budget_total,
+                        "remaining": max(task_budget_total - task_budget_spent, 0),
+                    }
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -9947,6 +10074,10 @@ class Pipe:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
+                    if task_budget_total:
+                        task_budget_spent += (
+                            getattr(getattr(sdk_final_message, "usage", None), "output_tokens", 0) or 0
+                        )
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
