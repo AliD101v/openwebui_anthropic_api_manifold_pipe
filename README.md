@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.10.2`
+- **Current pipe version:** `0.10.3`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -237,9 +237,14 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
-### `v0.10.2`
+### `v0.10.3`
 - Per-message effort (OpenWebUI's `reasoning_effort`, or an `EFFORT` valve change) no longer invalidates the prompt cache on models that support it (beta `mid-conversation-output-config-2026-07-01`: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level `output_config.effort` stays pinned to the user's `EFFORT` valve; a deviation goes out as an effort-only mid-conversation message instead, so only requests with history to protect and adaptive thinking active use it
 - Task Budgets (beta `task-budgets-2026-03-13`): new `TASK_BUDGET_TOKENS` valve (`0` = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard `max_tokens` cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on
+
+### `v0.10.2`
+- Logs carry no chat content or personal data at any level, DEBUG included. The `[PAYLOAD]` line replaces every string in `messages`, `system` and `metadata` with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and `cache_control` stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters
+- Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump
+- The `anthropic` SDK logger is capped at INFO: under `GLOBAL_LOG_LEVEL=DEBUG` it logged every request body in full. OpenWebUI's own DEBUG logs still contain chat content; keep `GLOBAL_LOG_LEVEL` at INFO or above in production
 
 ### `v0.10.1`
 - OpenWebUI Tool Search with `ENABLE_TOOL_SEARCH` on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text
