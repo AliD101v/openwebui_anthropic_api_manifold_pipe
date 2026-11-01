@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.3
+version: 0.10.4
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -39,6 +39,9 @@ Supports:
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.4
+- Task Budgets no longer send `remaining`. v0.10.3 lowered it on every tool loop request after the first; this pipe resends the full history each time, so that under-reported the budget (the model wrapped up earlier than the budget allowed) and the changing value invalidated the prompt-cache prefix. `task_budget` now goes out unchanged ({type, total}) and the server keeps the countdown, as Anthropic recommends for loops that resend full history.
+
 v0.10.3
 - Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
 - Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on.
@@ -7669,11 +7672,6 @@ class Pipe:
             retry_attempts = 0
             current_function_calls = 0
 
-            task_budget_total = (
-                (payload_for_stream.get("output_config") or {}).get("task_budget") or {}
-            ).get("total", 0)
-            task_budget_spent = 0
-
             await status.waiting()
 
             tool_loop_iteration = 0
@@ -7686,14 +7684,6 @@ class Pipe:
 
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
-
-                if task_budget_total and tool_loop_iteration > 1:
-
-                    payload_for_stream.setdefault("output_config", {})["task_budget"] = {
-                        "type": "tokens",
-                        "total": task_budget_total,
-                        "remaining": max(task_budget_total - task_budget_spent, 0),
-                    }
 
                 try:
                     stream_event_counts = {}
@@ -8086,10 +8076,6 @@ class Pipe:
                                     text_state.chunk_count = 0
 
                         sdk_final_message = stream.current_message_snapshot
-                    if task_budget_total:
-                        task_budget_spent += (
-                            getattr(getattr(sdk_final_message, "usage", None), "output_tokens", 0) or 0
-                        )
 
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 

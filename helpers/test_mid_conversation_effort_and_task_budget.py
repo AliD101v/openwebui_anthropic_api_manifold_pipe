@@ -289,6 +289,22 @@ async def test_task_budget_ignored_on_unsupported_model(module):
     assert "task-budgets-2026-03-13" not in beta.split(","), beta
 
 
+async def test_task_budget_remaining_never_sent(module):
+    """The pipe resends full history on every tool-loop request, so the server
+    tracks the countdown itself. A client-decremented ``remaining`` under-reports
+    the budget and changes the rendered prompt every request (cache miss), which
+    is why v0.10.3 was corrected in v0.10.4. ``remaining`` is only for client-side
+    history rewrites, which this pipe never does mid-turn. The orchestrator is not
+    exercised end to end here, so guard the sources: no code path may write a
+    ``"remaining"`` key into the payload."""
+    root = MODULE_PATH.parents[1]
+    for rel in ("pipe_orchestrator.py", "request/payload.py"):
+        source = (root / rel).read_text(encoding="utf-8")
+        assert '"remaining"' not in source and "'remaining'" not in source, (
+            f"{rel} writes a task_budget 'remaining' key"
+        )
+
+
 async def main():
     module = _load_module()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

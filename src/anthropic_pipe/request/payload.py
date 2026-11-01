@@ -552,9 +552,10 @@ async def create_request_payload(
     # the model sees a running countdown and paces itself, distinct from the
     # hard `max_tokens` cap it isn't aware of. Opt-in, admin/user-configured
     # only (TASK_BUDGET_TOKENS valve, 0 = disabled): the right total depends on
-    # the task, never guessed here. The orchestrator fills in `remaining` on
-    # later tool loop iterations since this pipe resends full history on every
-    # request rather than keeping one open stream.
+    # the task, never guessed here. Sent unchanged on every tool-loop request and
+    # never with `remaining`: the server counts what Claude generates and reads
+    # this turn (not the history we resend), and a client-decremented `remaining`
+    # both under-reports the budget and invalidates the cache prefix.
     task_budget_total = getattr(__user__["valves"], "TASK_BUDGET_TOKENS", 0) or 0
     if task_budget_total and model_info.get("supports_task_budget", False):
         payload.setdefault("output_config", {})["task_budget"] = {

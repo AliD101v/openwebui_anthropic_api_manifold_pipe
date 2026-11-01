@@ -304,16 +304,13 @@ class PipeOrchestratorMethods:
             retry_attempts = 0
             current_function_calls = 0
 
-            # Task Budgets (beta): `total` is fixed for the whole turn; `remaining`
-            # is this pipe's own bookkeeping, not the server's. Every tool loop
-            # iteration is a brand-new request replaying full history (no open
-            # session the server can track spend against), so starting with
-            # iteration 2 the countdown is carried forward by hand from the
-            # output tokens the previous iterations actually generated.
-            task_budget_total = (
-                (payload_for_stream.get("output_config") or {}).get("task_budget") or {}
-            ).get("total", 0)
-            task_budget_spent = 0
+            # Task Budgets (beta): the `task_budget` set in create_request_payload()
+            # goes out unchanged on every tool-loop request. The server derives the
+            # countdown from what Claude generated and read this turn, and does not
+            # recount the history we resend. Never decrement `remaining` here: that
+            # under-reports the budget (the model wraps up early) and the changing
+            # value invalidates the prompt-cache prefix. `remaining` is only for
+            # client-side history rewrites, which this pipe does not do mid-turn.
 
             await status.waiting()
 
@@ -331,17 +328,6 @@ class PipeOrchestratorMethods:
                 # Reset per-iteration state
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
-
-                if task_budget_total and tool_loop_iteration > 1:
-                    # First iteration sends `total` alone (server defaults
-                    # remaining to it); later ones report what this loop has
-                    # already spent so the countdown keeps decreasing instead
-                    # of resetting on every freshly-resent request.
-                    payload_for_stream.setdefault("output_config", {})["task_budget"] = {
-                        "type": "tokens",
-                        "total": task_budget_total,
-                        "remaining": max(task_budget_total - task_budget_spent, 0),
-                    }
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -820,10 +806,6 @@ class PipeOrchestratorMethods:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
-                    if task_budget_total:
-                        task_budget_spent += (
-                            getattr(getattr(sdk_final_message, "usage", None), "output_tokens", 0) or 0
-                        )
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 

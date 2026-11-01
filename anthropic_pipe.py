@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.3
+version: 0.10.4
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -39,6 +39,9 @@ Supports:
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.4
+- Task Budgets no longer send `remaining`. v0.10.3 lowered it on every tool loop request after the first; this pipe resends the full history each time, so that under-reported the budget (the model wrapped up earlier than the budget allowed) and the changing value invalidated the prompt-cache prefix. `task_budget` now goes out unchanged ({type, total}) and the server keeps the countdown, as Anthropic recommends for loops that resend full history.
+
 v0.10.3
 - Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
 - Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on.
@@ -1387,9 +1390,10 @@ async def create_request_payload(
     # the model sees a running countdown and paces itself, distinct from the
     # hard `max_tokens` cap it isn't aware of. Opt-in, admin/user-configured
     # only (TASK_BUDGET_TOKENS valve, 0 = disabled): the right total depends on
-    # the task, never guessed here. The orchestrator fills in `remaining` on
-    # later tool loop iterations since this pipe resends full history on every
-    # request rather than keeping one open stream.
+    # the task, never guessed here. Sent unchanged on every tool-loop request and
+    # never with `remaining`: the server counts what Claude generates and reads
+    # this turn (not the history we resend), and a client-decremented `remaining`
+    # both under-reports the budget and invalidates the cache prefix.
     task_budget_total = getattr(__user__["valves"], "TASK_BUDGET_TOKENS", 0) or 0
     if task_budget_total and model_info.get("supports_task_budget", False):
         payload.setdefault("output_config", {})["task_budget"] = {
@@ -9560,16 +9564,13 @@ class Pipe:
             retry_attempts = 0
             current_function_calls = 0
 
-            # Task Budgets (beta): `total` is fixed for the whole turn; `remaining`
-            # is this pipe's own bookkeeping, not the server's. Every tool loop
-            # iteration is a brand-new request replaying full history (no open
-            # session the server can track spend against), so starting with
-            # iteration 2 the countdown is carried forward by hand from the
-            # output tokens the previous iterations actually generated.
-            task_budget_total = (
-                (payload_for_stream.get("output_config") or {}).get("task_budget") or {}
-            ).get("total", 0)
-            task_budget_spent = 0
+            # Task Budgets (beta): the `task_budget` set in create_request_payload()
+            # goes out unchanged on every tool-loop request. The server derives the
+            # countdown from what Claude generated and read this turn, and does not
+            # recount the history we resend. Never decrement `remaining` here: that
+            # under-reports the budget (the model wraps up early) and the changing
+            # value invalidates the prompt-cache prefix. `remaining` is only for
+            # client-side history rewrites, which this pipe does not do mid-turn.
 
             await status.waiting()
 
@@ -9587,17 +9588,6 @@ class Pipe:
                 # Reset per-iteration state
                 stream_output_tokens = 0
                 stream_web_search_requests = 0
-
-                if task_budget_total and tool_loop_iteration > 1:
-                    # First iteration sends `total` alone (server defaults
-                    # remaining to it); later ones report what this loop has
-                    # already spent so the countdown keeps decreasing instead
-                    # of resetting on every freshly-resent request.
-                    payload_for_stream.setdefault("output_config", {})["task_budget"] = {
-                        "type": "tokens",
-                        "total": task_budget_total,
-                        "remaining": max(task_budget_total - task_budget_spent, 0),
-                    }
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -10076,10 +10066,6 @@ class Pipe:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
-                    if task_budget_total:
-                        task_budget_spent += (
-                            getattr(getattr(sdk_final_message, "usage", None), "output_tokens", 0) or 0
-                        )
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
