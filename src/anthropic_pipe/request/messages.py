@@ -27,7 +27,7 @@ class PipeRequestMessagesMethods:
             # blocks.  Batch consecutive tool messages into a single user message
             # so the API always sees alternating user/assistant turns.
             if role == "tool":
-                tool_use_id = msg.get("tool_call_id", "")
+                tool_use_id = self._claude_tool_use_id(msg.get("tool_call_id"))
                 content_str = (
                     raw_content
                     if isinstance(raw_content, str)
@@ -53,6 +53,32 @@ class PipeRequestMessagesMethods:
                 else:
                     processed_messages.append({"role": "user", "content": [tool_result_block]})
                 logger.debug(f"Converted role=tool → tool_result block (id={tool_use_id!r})")
+                continue
+
+            # The matching half of the role: "tool" case above. OpenWebUI replays
+            # tool calls it ran itself as an assistant message with OpenAI-style
+            # `tool_calls` and no useful content: hidden preloads (the Open
+            # Terminal skill manifest, memory recall, attached knowledge, all
+            # `fc_...` ids) and earlier turns that ran on another model. Dropping
+            # the message as empty left its role: "tool" answers pointing at
+            # nothing, and the API refuses the request ("unexpected tool_use_id
+            # found in tool_result blocks").
+            if (
+                role == "assistant"
+                and isinstance(msg.get("tool_calls"), list)
+                and msg["tool_calls"]
+            ):
+                call_blocks = self._convert_content_to_claude_format(raw_content, role=role)
+                for tool_call in msg["tool_calls"]:
+                    tool_use_block = self._openai_tool_call_to_tool_use(tool_call)
+                    if tool_use_block:
+                        call_blocks.append(tool_use_block)
+                if call_blocks:
+                    wrapped_call_msg = {"role": "assistant", "content": call_blocks}
+                    extracted_metadata = self._extract_metadata_marker_from_message(wrapped_call_msg)
+                    if extracted_metadata:
+                        previous_marker_metadata.extend(extracted_metadata)
+                    processed_messages.append(wrapped_call_msg)
                 continue
 
             # Historical assistant turns may carry tool calls serialized as
@@ -130,6 +156,8 @@ class PipeRequestMessagesMethods:
                                 "text": f"{MEMORY_CONTEXT_APPENDIX_HEADER}{extracted_memories}",
                             }
                         )
+
+        processed_messages = self._reconcile_tool_pairs(processed_messages)
 
         # Client-side compaction trim: drop messages before the last compaction
         # block. The API would ignore them anyway but this saves bandwidth and
@@ -667,6 +695,153 @@ class PipeRequestMessagesMethods:
             f"📋 RAG: moved {len(extracted)} block(s) into a trailing content block"
         )
         return True
+
+    @staticmethod
+    def _claude_tool_use_id(raw_id) -> str:
+        """Normalize a foreign tool call id to what Anthropic accepts.
+
+        tool_use ids must match ``^[a-zA-Z0-9_-]{1,64}$``. Ids minted by other
+        providers (or by OpenWebUI itself) normally already do; anything else is
+        mapped deterministically, so a tool_use and the tool_result answering it
+        still agree on the id. An empty id stays empty, which marks "no usable id".
+        """
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_id or ""))[:64]
+
+    def _openai_tool_call_to_tool_use(self, tool_call) -> Optional[dict]:
+        """Convert one OpenAI-style ``tool_calls`` entry into a Claude ``tool_use`` block.
+
+        Returns None for an entry without a usable id or name: a block the API
+        would reject is worse than a call Claude never sees.
+        """
+        if not isinstance(tool_call, dict):
+            return None
+        function = tool_call.get("function") or {}
+        tool_use_id = self._claude_tool_use_id(tool_call.get("id"))
+        name = function.get("name")
+        if not tool_use_id or not name:
+            return None
+        arguments = function.get("arguments")
+        tool_input: dict = {}
+        if isinstance(arguments, dict):
+            tool_input = arguments
+        elif isinstance(arguments, str) and arguments.strip():
+            try:
+                parsed = json.loads(arguments)
+                if isinstance(parsed, dict):
+                    tool_input = parsed
+            except (json.JSONDecodeError, ValueError):
+                logger.warning(
+                    f"Failed to parse tool_use arguments for {name!r} ({len(arguments)}c)"
+                )
+        return {"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}
+
+    @staticmethod
+    def _reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
+        """Make every ``tool_result`` answer a ``tool_use`` in the message before it, and vice versa.
+
+        The API rejects a request outright when the pairing is broken, in either
+        direction. OpenWebUI's own history can still break it (a tool call
+        stored without its output, a call and its result separated by a trimmed
+        turn), and a 400 there makes the whole chat unusable until the history
+        is edited by hand. Valid histories pass through untouched, so cached
+        prefixes stay byte-identical.
+
+        An orphaned result is kept as plain text, because it is information the
+        model may still need; a call nobody answered is dropped, since there is
+        nothing to show for it.
+        """
+
+        def block_ids(msg, block_type: str, key: str) -> set:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                return set()
+            return {
+                b[key]
+                for b in content
+                if isinstance(b, dict) and b.get("type") == block_type and b.get(key)
+            }
+
+        reconciled: list[dict] = []
+        orphan_results = 0
+        unanswered_calls = 0
+        for idx, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                reconciled.append(msg)
+                continue
+
+            role = msg.get("role")
+            kept = content
+            if role == "user":
+                previous = messages[idx - 1] if idx > 0 else None
+                paired = (
+                    block_ids(previous, "tool_use", "id")
+                    if previous and previous.get("role") == "assistant"
+                    else set()
+                )
+                if any(
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") not in paired
+                    for b in content
+                ):
+                    kept = []
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "tool_result"
+                            and block.get("tool_use_id") not in paired
+                        ):
+                            orphan_results += 1
+                            result = block.get("content")
+                            if isinstance(result, list):
+                                result = "\n".join(
+                                    b.get("text", "")
+                                    for b in result
+                                    if isinstance(b, dict) and b.get("type") == "text"
+                                )
+                            if isinstance(result, str) and result.strip():
+                                kept.append({"type": "text", "text": f"[Tool result]\n{result}"})
+                            continue
+                        kept.append(block)
+                    # tool_result blocks have to lead the message; a salvaged
+                    # text block must not end up in front of a surviving one.
+                    kept.sort(
+                        key=lambda b: not (isinstance(b, dict) and b.get("type") == "tool_result")
+                    )
+            elif role == "assistant":
+                following = messages[idx + 1] if idx + 1 < len(messages) else None
+                answered = (
+                    block_ids(following, "tool_result", "tool_use_id")
+                    if following and following.get("role") == "user"
+                    else set()
+                )
+                if any(
+                    isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in answered
+                    for b in content
+                ):
+                    kept = [
+                        b
+                        for b in content
+                        if not (
+                            isinstance(b, dict)
+                            and b.get("type") == "tool_use"
+                            and b.get("id") not in answered
+                        )
+                    ]
+                    unanswered_calls += len(content) - len(kept)
+
+            if kept is content:
+                reconciled.append(msg)
+            elif kept:
+                reconciled.append({**msg, "content": kept})
+
+        if orphan_results or unanswered_calls:
+            logger.warning(
+                f"Repaired unpaired tool history: {orphan_results} orphaned tool_result "
+                f"block(s) kept as text, {unanswered_calls} unanswered tool_use block(s) dropped"
+            )
+        return reconciled
 
     def _parse_assistant_tool_calls_string(self, content: str) -> list[dict]:
         """Reconstruct structured Claude messages from an OpenWebUI assistant

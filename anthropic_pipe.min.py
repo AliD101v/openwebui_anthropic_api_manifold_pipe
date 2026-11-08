@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.4
+version: 0.10.5
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -39,6 +39,9 @@ Supports:
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.5
+- Fixed a 400 ("unexpected tool_use_id found in tool_result blocks") on chats with Open Terminal or skills enabled. OpenWebUI hands the pipe its own hidden tool calls (terminal skill manifest, memory recall, attached knowledge) as an assistant message with OpenAI-style `tool_calls` plus `role: tool` answers; the pipe dropped the assistant half as empty and sent the answers as orphaned `tool_result` blocks. `tool_calls` now become `tool_use` blocks, and the same applies to tool turns an earlier model ran in the same chat. A final pairing check keeps one broken history entry from making a chat unusable: an orphaned result is kept as text, an unanswered call is dropped, and valid histories pass through unchanged so the prompt cache is unaffected.
+
 v0.10.4
 - Task Budgets no longer send `remaining`. v0.10.3 lowered it on every tool loop request after the first; this pipe resends the full history each time, so that under-reported the budget (the model wrapped up earlier than the budget allowed) and the changing value invalidated the prompt-cache prefix. `task_budget` now goes out unchanged ({type, total}) and the server keeps the countdown, as Anthropic recommends for loops that resend full history.
 
@@ -3949,7 +3952,7 @@ class Pipe:
             raw_content = msg.get("content")
 
             if role == "tool":
-                tool_use_id = msg.get("tool_call_id", "")
+                tool_use_id = self._claude_tool_use_id(msg.get("tool_call_id"))
                 content_str = (
                     raw_content
                     if isinstance(raw_content, str)
@@ -3973,6 +3976,24 @@ class Pipe:
                 else:
                     processed_messages.append({"role": "user", "content": [tool_result_block]})
                 logger.debug(f"Converted role=tool → tool_result block (id={tool_use_id!r})")
+                continue
+
+            if (
+                role == "assistant"
+                and isinstance(msg.get("tool_calls"), list)
+                and msg["tool_calls"]
+            ):
+                call_blocks = self._convert_content_to_claude_format(raw_content, role=role)
+                for tool_call in msg["tool_calls"]:
+                    tool_use_block = self._openai_tool_call_to_tool_use(tool_call)
+                    if tool_use_block:
+                        call_blocks.append(tool_use_block)
+                if call_blocks:
+                    wrapped_call_msg = {"role": "assistant", "content": call_blocks}
+                    extracted_metadata = self._extract_metadata_marker_from_message(wrapped_call_msg)
+                    if extracted_metadata:
+                        previous_marker_metadata.extend(extracted_metadata)
+                    processed_messages.append(wrapped_call_msg)
                 continue
 
             if (
@@ -4033,6 +4054,8 @@ class Pipe:
                                 "text": f"{MEMORY_CONTEXT_APPENDIX_HEADER}{extracted_memories}",
                             }
                         )
+
+        processed_messages = self._reconcile_tool_pairs(processed_messages)
 
         last_compaction_idx = -1
         for idx, msg in enumerate(processed_messages):
@@ -4459,6 +4482,127 @@ class Pipe:
             f"📋 RAG: moved {len(extracted)} block(s) into a trailing content block"
         )
         return True
+
+    @staticmethod
+    def _claude_tool_use_id(raw_id) -> str:
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_id or ""))[:64]
+
+    def _openai_tool_call_to_tool_use(self, tool_call) -> Optional[dict]:
+        if not isinstance(tool_call, dict):
+            return None
+        function = tool_call.get("function") or {}
+        tool_use_id = self._claude_tool_use_id(tool_call.get("id"))
+        name = function.get("name")
+        if not tool_use_id or not name:
+            return None
+        arguments = function.get("arguments")
+        tool_input: dict = {}
+        if isinstance(arguments, dict):
+            tool_input = arguments
+        elif isinstance(arguments, str) and arguments.strip():
+            try:
+                parsed = json.loads(arguments)
+                if isinstance(parsed, dict):
+                    tool_input = parsed
+            except (json.JSONDecodeError, ValueError):
+                logger.warning(
+                    f"Failed to parse tool_use arguments for {name!r} ({len(arguments)}c)"
+                )
+        return {"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}
+
+    @staticmethod
+    def _reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
+
+        def block_ids(msg, block_type: str, key: str) -> set:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                return set()
+            return {
+                b[key]
+                for b in content
+                if isinstance(b, dict) and b.get("type") == block_type and b.get(key)
+            }
+
+        reconciled: list[dict] = []
+        orphan_results = 0
+        unanswered_calls = 0
+        for idx, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                reconciled.append(msg)
+                continue
+
+            role = msg.get("role")
+            kept = content
+            if role == "user":
+                previous = messages[idx - 1] if idx > 0 else None
+                paired = (
+                    block_ids(previous, "tool_use", "id")
+                    if previous and previous.get("role") == "assistant"
+                    else set()
+                )
+                if any(
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") not in paired
+                    for b in content
+                ):
+                    kept = []
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "tool_result"
+                            and block.get("tool_use_id") not in paired
+                        ):
+                            orphan_results += 1
+                            result = block.get("content")
+                            if isinstance(result, list):
+                                result = "\n".join(
+                                    b.get("text", "")
+                                    for b in result
+                                    if isinstance(b, dict) and b.get("type") == "text"
+                                )
+                            if isinstance(result, str) and result.strip():
+                                kept.append({"type": "text", "text": f"[Tool result]\n{result}"})
+                            continue
+                        kept.append(block)
+
+                    kept.sort(
+                        key=lambda b: not (isinstance(b, dict) and b.get("type") == "tool_result")
+                    )
+            elif role == "assistant":
+                following = messages[idx + 1] if idx + 1 < len(messages) else None
+                answered = (
+                    block_ids(following, "tool_result", "tool_use_id")
+                    if following and following.get("role") == "user"
+                    else set()
+                )
+                if any(
+                    isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in answered
+                    for b in content
+                ):
+                    kept = [
+                        b
+                        for b in content
+                        if not (
+                            isinstance(b, dict)
+                            and b.get("type") == "tool_use"
+                            and b.get("id") not in answered
+                        )
+                    ]
+                    unanswered_calls += len(content) - len(kept)
+
+            if kept is content:
+                reconciled.append(msg)
+            elif kept:
+                reconciled.append({**msg, "content": kept})
+
+        if orphan_results or unanswered_calls:
+            logger.warning(
+                f"Repaired unpaired tool history: {orphan_results} orphaned tool_result "
+                f"block(s) kept as text, {unanswered_calls} unanswered tool_use block(s) dropped"
+            )
+        return reconciled
 
     def _parse_assistant_tool_calls_string(self, content: str) -> list[dict]:
         segments: list[tuple[str, str]] = []

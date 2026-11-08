@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.10.4`
+- **Current pipe version:** `0.10.5`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -237,6 +237,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.10.5`
+- Fixed a 400 ("unexpected tool_use_id found in tool_result blocks") on chats with Open Terminal or skills enabled. OpenWebUI hands the pipe its own hidden tool calls (terminal skill manifest, memory recall, attached knowledge) as an assistant message with OpenAI-style `tool_calls` plus `role: tool` answers; the pipe dropped the assistant half as empty and sent the answers as orphaned `tool_result` blocks. `tool_calls` now become `tool_use` blocks, and the same applies to tool turns an earlier model ran in the same chat. A final pairing check keeps one broken history entry from making a chat unusable: an orphaned result is kept as text, an unanswered call is dropped, and valid histories pass through unchanged so the prompt cache is unaffected.
+
 ### `v0.10.4`
 - Task Budgets no longer send `remaining`. v0.10.3 lowered it on every tool loop request after the first; this pipe resends the full history each time, so that under-reported the budget (the model wrapped up earlier than the budget allowed) and the changing value invalidated the prompt-cache prefix. `task_budget` now goes out unchanged (`{type, total}`) and the server keeps the countdown, as Anthropic recommends for loops that resend full history
 
