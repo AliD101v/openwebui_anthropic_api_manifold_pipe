@@ -46,7 +46,7 @@ async def create_request_payload(
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
-    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5).
+    # Add Fast Mode if enabled and model supports it (Opus 5.5 / Opus 5).
     # Two ways in: the admin valve turns it on for every request, the toggle
     # filter turns it on for a single message. Fast mode is a per-request
     # trade (latency against depth), so the per-message switch is the one
@@ -570,7 +570,7 @@ async def create_request_payload(
     # speed. Bind to payload["speed"] -- set above from the valve OR the
     # per-message toggle and already gated on supports_fast_mode -- so the
     # opt-in header follows the toggle, not just the admin valve. Only the
-    # research-preview models (Opus 5, Opus 4.8) need it; Opus 5.5 is GA.
+    # research-preview model (Opus 5) needs it; Opus 5.5 is GA.
     if payload.get("speed") == "fast" and model_info.get("fast_mode_beta"):
         beta_headers.append("fast-mode-2026-02-01")
 
@@ -603,7 +603,7 @@ async def create_request_payload(
         getattr(pipe.valves, "ENABLE_CACHE_DIAGNOSTICS", False)
         and pipe.valves.CACHE_CONTROL != "cache disabled"
     ):
-        beta_headers.append("cache-diagnosis-2026-04-07")
+        # GA since 2026-09-23: the `diagnostics` object alone opts in.
         chat_id_for_diag = __metadata__.get("chat_id") if __metadata__ else None
         # Prefer the response id persisted as a `cachediag` marker on the prior
         # assistant message (survives pipe restarts / multiple workers). Fall

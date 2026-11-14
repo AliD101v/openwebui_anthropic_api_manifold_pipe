@@ -18,16 +18,40 @@ class PipeRequestMessagesMethods:
         if raw_messages is None or len(raw_messages) == 0:
             return system_messages, processed_messages, previous_marker_metadata
 
+        # Turns OpenWebUI rebuilt from the pipe's output items (tool calls,
+        # thinking) come back as assistant/tool runs; rebuild them in one go.
+        raw_messages = group_item_runs(raw_messages)
+
+        # The message the user just wrote. Up to OpenWebUI 0.12 it is the last
+        # one; 0.13 appends hidden tool results (skill list, memories, attached
+        # knowledge) after it, so it is the last *user* message instead.
+        current_user_i = max(
+            (i for i, m in enumerate(raw_messages) if m.get("role") == "user"), default=-1
+        )
+        if any(m.get("role") == "assistant" for m in raw_messages[current_user_i + 1 :]):
+            current_user_i = -1  # already answered (continue a response): nothing volatile to place
+
         for i, msg in enumerate(raw_messages):
             role = msg.get("role")
             raw_content = msg.get("content")
+
+            if role == "__item_run__":
+                for pmsg in rebuild_run(msg["messages"]):
+                    if pmsg["role"] == "assistant":
+                        extracted_metadata = self._clean_item_run_text(pmsg)
+                        if extracted_metadata:
+                            previous_marker_metadata.extend(extracted_metadata)
+                        if not pmsg["content"]:
+                            continue
+                    processed_messages.append(pmsg)
+                continue
 
             # OpenAI-style tool result messages (role: "tool") are not valid for
             # Anthropic's API.  Convert them to role: "user" + type: "tool_result"
             # blocks.  Batch consecutive tool messages into a single user message
             # so the API always sees alternating user/assistant turns.
             if role == "tool":
-                tool_use_id = self._claude_tool_use_id(msg.get("tool_call_id"))
+                tool_use_id = msg.get("tool_call_id", "")
                 content_str = (
                     raw_content
                     if isinstance(raw_content, str)
@@ -53,32 +77,6 @@ class PipeRequestMessagesMethods:
                 else:
                     processed_messages.append({"role": "user", "content": [tool_result_block]})
                 logger.debug(f"Converted role=tool → tool_result block (id={tool_use_id!r})")
-                continue
-
-            # The matching half of the role: "tool" case above. OpenWebUI replays
-            # tool calls it ran itself as an assistant message with OpenAI-style
-            # `tool_calls` and no useful content: hidden preloads (the Open
-            # Terminal skill manifest, memory recall, attached knowledge, all
-            # `fc_...` ids) and earlier turns that ran on another model. Dropping
-            # the message as empty left its role: "tool" answers pointing at
-            # nothing, and the API refuses the request ("unexpected tool_use_id
-            # found in tool_result blocks").
-            if (
-                role == "assistant"
-                and isinstance(msg.get("tool_calls"), list)
-                and msg["tool_calls"]
-            ):
-                call_blocks = self._convert_content_to_claude_format(raw_content, role=role)
-                for tool_call in msg["tool_calls"]:
-                    tool_use_block = self._openai_tool_call_to_tool_use(tool_call)
-                    if tool_use_block:
-                        call_blocks.append(tool_use_block)
-                if call_blocks:
-                    wrapped_call_msg = {"role": "assistant", "content": call_blocks}
-                    extracted_metadata = self._extract_metadata_marker_from_message(wrapped_call_msg)
-                    if extracted_metadata:
-                        previous_marker_metadata.extend(extracted_metadata)
-                    processed_messages.append(wrapped_call_msg)
                 continue
 
             # Historical assistant turns may carry tool calls serialized as
@@ -142,7 +140,7 @@ class PipeRequestMessagesMethods:
 
                 processed_messages.append(wrapped_msg)
 
-                if i == len(raw_messages) - 1 and role == "user":
+                if i == current_user_i:
                     # Volatile context has to end up in trailing blocks of its
                     # own, so the cache breakpoint can sit right before it. RAG
                     # first, then memories -- RAG arrives merged into the prose
@@ -178,6 +176,21 @@ class PipeRequestMessagesMethods:
 
         return system_messages, processed_messages, previous_marker_metadata
 
+    def _clean_item_run_text(self, message: dict) -> list[str]:
+        """Strip what only the end of a turn adds to its text: diagnostics block, metadata marker.
+
+        Nothing else is touched: the tool loop sent these blocks unchanged
+        mid-turn, and the replay has to match them byte for byte.
+        """
+        for block in message["content"]:
+            if block.get("type") == "text":
+                block["text"] = PATTERN_CACHE_DIAGNOSTICS_BLOCK.sub("", block["text"])
+        extracted = self._extract_metadata_marker_from_message(message)
+        message["content"] = [
+            b for b in message["content"] if b.get("type") != "text" or b.get("text", "").strip()
+        ]
+        return extracted or []
+
     def _convert_content_to_claude_format(
         self, content: Union[str, List[dict], None], role: str = "user"
     ) -> List[dict]:
@@ -191,164 +204,8 @@ class PipeRequestMessagesMethods:
             return []
 
         if isinstance(content, str):
-            # NOTE: Do NOT remove thinking blocks from assistant messages!
-            # Per Anthropic docs: thinking blocks MUST be preserved unmodified during tool use loops.
-            # The entire sequence of consecutive thinking blocks must match the original model output.
-            # For multi-turn: prior turn thinking CAN be omitted (API auto-filters), but preserving is preferred.
-            # With interleaved thinking (Claude 4), thinking blocks can appear BETWEEN tool calls too.
-            # Thinking blocks come back as serialized text (with <details type="reasoning">...) from OpenWebUI,
-            # and the API requires them to remain unchanged.
-
-            # Strip OpenWebUI UI-rendering artifacts from conversation history.
-            # <details type="tool_calls"> and <details type="code_interpreter"> are display-only
-            # HTML that OpenWebUI stores in message content. If sent to Claude 4.6 models,
-            # they pattern-match these and generate fake tool call HTML as text output
-            # instead of making actual API tool_use calls.
             if role == "assistant":
-                content = PATTERN_TOOL_CALLS_DETAILS.sub("", content)
-                content = PATTERN_CODE_INTERPRETER_DETAILS.sub("", content)
-                content = PATTERN_CACHE_TRACE_DETAILS.sub("", content)
-
-                # Reconstruct ALL replayable <details> blocks (reasoning,
-                # server_tool_use, *_tool_result, compaction) into their
-                # API-native forms, in original document order. Positional
-                # fidelity is critical: the Anthropic API requires the exact
-                # sequence of thinking + server_tool_use + tool_result blocks
-                # to match the original assistant turn byte-exact, otherwise
-                # subsequent requests 400 with "thinking blocks cannot be
-                # modified" and the prompt cache prefix is invalidated.
-                all_matches: list[tuple[int, str, re.Match]] = []
-                for m in PATTERN_REASONING_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "reasoning", m))
-                for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "server_tool_use", m))
-                for m in PATTERN_SERVER_TOOL_RESULT_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "server_tool_result", m))
-                for m in PATTERN_COMPACTION_DETAILS.finditer(content):
-                    all_matches.append((m.start(), "compaction", m))
-                for m in PATTERN_HIDDEN_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "hidden", m))
-
-                if all_matches:
-                    # Pre-scan the standalone *_tool_result carriers, keyed by
-                    # tool_use_id. The API requires a server_tool_use to be
-                    # followed directly by its result; the stored HTML does not
-                    # guarantee that order once several server tools run in
-                    # quick succession (their carriers interleave with text and
-                    # with each other), and replaying document order then 400s
-                    # the next request with "tool use found without a
-                    # corresponding tool_result block".
-                    standalone_results: dict[str, dict] = {}
-                    for _, kind, match in all_matches:
-                        if kind != "server_tool_result":
-                            continue
-                        attrs = dict(PATTERN_DATA_ATTR.findall(match.group(1)))
-                        payload_b64 = attrs.get("payload-b64", "")
-                        decoded = (
-                            self._decode_block_payload(payload_b64) if payload_b64 else None
-                        )
-                        if (
-                            isinstance(decoded, dict)
-                            and decoded.get("type", "").endswith("_tool_result")
-                            and decoded.get("tool_use_id")
-                        ):
-                            standalone_results[decoded["tool_use_id"]] = decoded
-                    consumed_results: set[str] = set()
-                    all_matches.sort(key=lambda t: t[0])
-                    blocks: list[dict] = []
-                    last_end = 0
-                    for _, kind, match in all_matches:
-                        text_before = content[last_end:match.start()]
-                        if text_before.strip():
-                            blocks.append({"type": "text", "text": text_before})
-                        if kind == "reasoning":
-                            attrs_str = match.group(1)
-                            sig_match = re.search(
-                                r'data-signature="([^"]*)"', attrs_str
-                            )
-                            if sig_match:
-                                signature = html.unescape(sig_match.group(1))
-                                body = match.group(2)
-                                thinking_text = html.unescape(
-                                    PATTERN_REASONING_QUOTED_LINE.sub("", body)
-                                ).strip()
-                                blocks.append({
-                                    "type": "thinking",
-                                    "thinking": thinking_text,
-                                    "signature": signature,
-                                })
-                            # else: unsignatured reasoning → drop
-                        elif kind == "server_tool_use":
-                            attrs_str = match.group(1)
-                            attrs = dict(PATTERN_DATA_ATTR.findall(attrs_str))
-                            payload_b64 = attrs.get("payload-b64", "")
-                            decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
-                            if isinstance(decoded, dict) and decoded.get("type") == "server_tool_use":
-                                blocks.append(decoded)
-                                # If this carrier also embeds the matching
-                                # *_tool_result payload (merged display mode),
-                                # emit it right after so the API sees the
-                                # full tool_use + tool_result pair at the
-                                # original position.
-                                # data-result-kind carries the block type (e.g. "web_search_tool_result")
-                                # and data-result-payload-b64 carries the encoded payload. The decoded
-                                # payload already has "type": "...", so result_kind is just sanity-check.
-                                result_b64 = attrs.get("result-payload-b64", "")
-                                result_decoded = (
-                                    self._decode_block_payload(result_b64) if result_b64 else None
-                                )
-                                if (
-                                    isinstance(result_decoded, dict)
-                                    and result_decoded.get("type", "").endswith("_tool_result")
-                                ):
-                                    blocks.append(result_decoded)
-                                    if result_decoded.get("tool_use_id"):
-                                        consumed_results.add(result_decoded["tool_use_id"])
-                                else:
-                                    # No embedded result — pull the standalone
-                                    # carrier forward so the pair stays adjacent.
-                                    tool_use_id = decoded.get("id", "")
-                                    if tool_use_id in standalone_results:
-                                        blocks.append(standalone_results[tool_use_id])
-                                        consumed_results.add(tool_use_id)
-                                    else:
-                                        logger.warning(
-                                            "server_tool_use id=%r has no result carrier; "
-                                            "replaying it unpaired will 400 the request",
-                                            tool_use_id,
-                                        )
-                            # else: legacy/missing payload → drop
-                        elif kind == "server_tool_result":
-                            attrs_str = match.group(1)
-                            attrs = dict(PATTERN_DATA_ATTR.findall(attrs_str))
-                            payload_b64 = attrs.get("payload-b64", "")
-                            decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
-                            if isinstance(decoded, dict) and decoded.get("type", "").endswith("_tool_result"):
-                                # Skip what was already pulled forward next to
-                                # its server_tool_use above.
-                                if decoded.get("tool_use_id") not in consumed_results:
-                                    blocks.append(decoded)
-                            # else: legacy/missing payload → drop
-                        elif kind == "hidden":
-                            # One carrier may hold several blocks (a merged
-                            # server_tool_use + its *_tool_result), replayed in
-                            # the order they were emitted.
-                            decoded = self._decode_block_payload(match.group(1))
-                            if isinstance(decoded, list):
-                                blocks.extend(
-                                    b for b in decoded if isinstance(b, dict) and b.get("type")
-                                )
-                            # else: corrupt payload → drop
-                        elif kind == "compaction":
-                            blocks.append({
-                                "type": "compaction",
-                                "content": match.group(1).strip(),
-                            })
-                        last_end = match.end()
-                    after = content[last_end:]
-                    if after.strip():
-                        blocks.append({"type": "text", "text": after})
-                    return blocks
+                return self._legacy_assistant_blocks(content)
 
             # Only return non-empty text blocks
             if content.strip():
@@ -697,45 +554,6 @@ class PipeRequestMessagesMethods:
         return True
 
     @staticmethod
-    def _claude_tool_use_id(raw_id) -> str:
-        """Normalize a foreign tool call id to what Anthropic accepts.
-
-        tool_use ids must match ``^[a-zA-Z0-9_-]{1,64}$``. Ids minted by other
-        providers (or by OpenWebUI itself) normally already do; anything else is
-        mapped deterministically, so a tool_use and the tool_result answering it
-        still agree on the id. An empty id stays empty, which marks "no usable id".
-        """
-        return re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_id or ""))[:64]
-
-    def _openai_tool_call_to_tool_use(self, tool_call) -> Optional[dict]:
-        """Convert one OpenAI-style ``tool_calls`` entry into a Claude ``tool_use`` block.
-
-        Returns None for an entry without a usable id or name: a block the API
-        would reject is worse than a call Claude never sees.
-        """
-        if not isinstance(tool_call, dict):
-            return None
-        function = tool_call.get("function") or {}
-        tool_use_id = self._claude_tool_use_id(tool_call.get("id"))
-        name = function.get("name")
-        if not tool_use_id or not name:
-            return None
-        arguments = function.get("arguments")
-        tool_input: dict = {}
-        if isinstance(arguments, dict):
-            tool_input = arguments
-        elif isinstance(arguments, str) and arguments.strip():
-            try:
-                parsed = json.loads(arguments)
-                if isinstance(parsed, dict):
-                    tool_input = parsed
-            except (json.JSONDecodeError, ValueError):
-                logger.warning(
-                    f"Failed to parse tool_use arguments for {name!r} ({len(arguments)}c)"
-                )
-        return {"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}
-
-    @staticmethod
     def _reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
         """Make every ``tool_result`` answer a ``tool_use`` in the message before it, and vice versa.
 
@@ -749,7 +567,23 @@ class PipeRequestMessagesMethods:
         An orphaned result is kept as plain text, because it is information the
         model may still need; a call nobody answered is dropped, since there is
         nothing to show for it.
+
+        Ids that Anthropic would reject (``tool_use`` ids must match
+        ``^[a-zA-Z0-9_-]{1,64}$``; another provider's or OpenWebUI's own can
+        carry other characters) are mapped deterministically first, so a call
+        and its result still agree on the id. Valid ids are left alone.
         """
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                key = {"tool_use": "id", "tool_result": "tool_use_id"}.get(block.get("type"))
+                raw_id = block.get(key) if key else None
+                if raw_id and not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", str(raw_id)):
+                    block[key] = re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_id))[:64]
 
         def block_ids(msg, block_type: str, key: str) -> set:
             content = msg.get("content") if isinstance(msg, dict) else None
@@ -842,151 +676,6 @@ class PipeRequestMessagesMethods:
                 f"block(s) kept as text, {unanswered_calls} unanswered tool_use block(s) dropped"
             )
         return reconciled
-
-    def _parse_assistant_tool_calls_string(self, content: str) -> list[dict]:
-        """Reconstruct structured Claude messages from an OpenWebUI assistant
-        string that contains ``<details type="tool_calls">`` HTML blocks.
-
-        OpenWebUI stores the entire assistant turn (including tool calls and
-        results) as a single flat text string. To replay the conversation via
-        the Claude API we must parse that HTML back into structured
-        ``tool_use`` / ``tool_result`` blocks and emit the correct
-        assistant→user→assistant sequence.
-
-        Returns a list of ``{"role": ..., "content": [...]}`` dicts. Each
-        consecutive run of ``tool_calls`` becomes one assistant message with
-        multiple ``tool_use`` blocks followed by a single user message carrying
-        all matching ``tool_result`` blocks. Text between tool-call runs
-        terminates the current turn and starts a new assistant message.
-        """
-        segments: list[tuple[str, str]] = []
-        last_end = 0
-        for m in PATTERN_TOOL_CALLS_BLOCK.finditer(content):
-            segments.append(("text", content[last_end:m.start()]))
-            segments.append(("tool_call", m.group(1)))
-            last_end = m.end()
-        segments.append(("text", content[last_end:]))
-
-        messages: list[dict] = []
-        current_assistant: list[dict] = []
-        pending_results: list[dict] = []
-
-        def flush() -> None:
-            """Emit the accumulated assistant/tool_result messages and reset the buffers."""
-            if current_assistant:
-                messages.append({"role": "assistant", "content": list(current_assistant)})
-                current_assistant.clear()
-            if pending_results:
-                messages.append({"role": "user", "content": list(pending_results)})
-                pending_results.clear()
-
-        for kind, data in segments:
-            if kind == "text":
-                # Emptiness is checked BEFORE the flush, not after. Consecutive
-                # tool-call blocks are separated by an empty segment (the pattern
-                # eats the newline on both sides), and flushing on that split a
-                # single multi-tool assistant turn into one message per tool --
-                # a valid but different structure than the live turn, so the
-                # prefix diverged there.
-                if not data.strip():
-                    continue
-                # Reuse the existing converter for text (handles compaction
-                # extraction and code_interpreter stripping). It will also no-op
-                # on the already-extracted tool_calls HTML.
-                blocks = self._convert_content_to_claude_format(data, role="assistant")
-                if not blocks:
-                    continue
-                # Only real prose terminates the prior turn. A segment holding
-                # nothing but server-tool carriers (web_search and friends are
-                # rendered as <details type="tool_calls"> too, but carry
-                # data-payload-b64 and are therefore skipped by
-                # PATTERN_TOOL_CALLS_BLOCK) belongs to the SAME assistant
-                # message it was emitted in. Flushing there produced
-                # assistant[text, tool_use] / user[tool_result] /
-                # assistant[server_tool_use] -- three messages where the live
-                # turn had two.
-                if pending_results and any(
-                    isinstance(b, dict) and b.get("type") == "text" for b in blocks
-                ):
-                    # A server tool the model called right after the client
-                    # tool_use belongs to that same assistant message; only its
-                    # result opens the next one (see server_tool.py, after_client).
-                    after_client_ids = {
-                        html.unescape(a.get("tool-use-id", ""))
-                        for a in (
-                            dict(PATTERN_DATA_ATTR.findall(m.group(1)))
-                            for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(data)
-                        )
-                        if a.get("after-client") == "true"
-                    }
-                    while (
-                        blocks
-                        and blocks[0].get("type") == "server_tool_use"
-                        and blocks[0].get("id") in after_client_ids
-                    ):
-                        current_assistant.append(blocks.pop(0))
-                    flush()
-                current_assistant.extend(blocks)
-            else:  # tool_call
-                attrs = dict(PATTERN_TOOL_CALLS_ATTRS.findall(data))
-                tc_id = html.unescape(attrs.get("id", "") or "")
-                tc_name = html.unescape(attrs.get("name", "") or "")
-                if not tc_id or not tc_name:
-                    logger.warning(
-                        "Skipping malformed <details type='tool_calls'> "
-                        "block (missing id/name) during history reconstruction"
-                    )
-                    continue
-                tc_args_raw = html.unescape(attrs.get("arguments", "") or "")
-                tc_result_raw = self._canonical_tool_result_text(html.unescape(attrs.get("result", "") or ""))
-                tc_done = (attrs.get("done", "true") or "true") == "true"
-                tc_error = (attrs.get("error", "false") or "false") == "true"
-                try:
-                    tc_input = json.loads(tc_args_raw) if tc_args_raw else {}
-                    if not isinstance(tc_input, dict):
-                        tc_input = {}
-                except (json.JSONDecodeError, ValueError):
-                    logger.warning(
-                        f"Failed to parse tool_use arguments for "
-                        f"{tc_name!r} ({len(tc_args_raw)}c)"
-                    )
-                    tc_input = {}
-                current_assistant.append({
-                    "type": "tool_use",
-                    "id": tc_id,
-                    "name": tc_name,
-                    "input": tc_input,
-                })
-                if tc_done:
-                    # Route through the same converter as live tool results:
-                    # embedded data:image URIs become real image blocks instead
-                    # of raw base64 text (~1.5k vs ~170k tokens per image), and
-                    # the TOOL_RESULT_MAX_TOKENS backstop applies on replay too.
-                    result_content = (
-                        self._convert_tool_result_content(tc_result_raw)
-                        if tc_result_raw
-                        else "(no result)"
-                    )
-                    result_block: dict = {
-                        "type": "tool_result",
-                        "tool_use_id": tc_id,
-                        "content": result_content,
-                    }
-                    if tc_error:
-                        result_block["is_error"] = True
-                else:
-                    # Interrupted / aborted tool call — synthesize an error
-                    # result so the assistant/user chain stays valid.
-                    result_block = {
-                        "type": "tool_result",
-                        "tool_use_id": tc_id,
-                        "content": "tool execution was interrupted",
-                        "is_error": True,
-                    }
-                pending_results.append(result_block)
-
-        flush()
-        return messages
 
     @staticmethod
     def _canonical_tool_result_text(text: str) -> str:

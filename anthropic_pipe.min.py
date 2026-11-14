@@ -4,9 +4,9 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.5
+version: 0.11.2
 license: MIT
-requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
+requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -32,39 +32,49 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5.5 / 5 / 4.8
+- Fast Mode for Fable 5.2 and Opus 5.5 / 5
+- Message threads for tool loops (beta, optional)
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 - Per-message Effort override that preserves the prompt cache
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
-v0.10.5
-- Fixed a 400 ("unexpected tool_use_id found in tool_result blocks") on chats with Open Terminal or skills enabled. OpenWebUI hands the pipe its own hidden tool calls (terminal skill manifest, memory recall, attached knowledge) as an assistant message with OpenAI-style `tool_calls` plus `role: tool` answers; the pipe dropped the assistant half as empty and sent the answers as orphaned `tool_result` blocks. `tool_calls` now become `tool_use` blocks, and the same applies to tool turns an earlier model ran in the same chat. A final pairing check keeps one broken history entry from making a chat unusable: an orphaned result is kept as text, an unanswered call is dropped, and valid histories pass through unchanged so the prompt cache is unaffected.
+v0.11.2
+- Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1 / 5.2, Mythos 5.1 / 5.2). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
+- Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1/5.2, Mythos 5/5.1/5.2. `task_budget` goes out unchanged ({type, total}) on every request and the server keeps the countdown: this pipe resends the full history on each tool-loop request, and a lowered `remaining` would under-report the budget and invalidate the prompt-cache prefix.
+- A final pairing check keeps one broken history entry from making a chat unusable (the API rejects a tool_result without its tool_use, and the reverse, with a 400 that repeats on every message): an orphaned result is kept as text, an unanswered call is dropped, a tool id Anthropic would reject (it allows only letters, digits, _ and -) is mapped to a valid one on both the call and its result, and valid histories pass through unchanged so the prompt cache is unaffected.
 
-v0.10.4
-- Task Budgets no longer send `remaining`. v0.10.3 lowered it on every tool loop request after the first; this pipe resends the full history each time, so that under-reported the budget (the model wrapped up earlier than the budget allowed) and the changing value invalidated the prompt-cache prefix. `task_budget` now goes out unchanged ({type, total}) and the server keeps the countdown, as Anthropic recommends for loops that resend full history.
+v0.11.1
+- Claude Fable 5.2 and Mythos 5.2: model data, prices ($8 / $40 per MTok, fast mode $16 / $80) and fast mode, which needs no beta header there. Thinking cannot be switched off on them; with the thinking toggle off the pipe sends effort `low`, as on Opus 5.5.
+- Advisor pairs follow Anthropic's current table: Fable 5.2 can advise every model, a Fable 5.2 chat model takes only Fable / Mythos 5.2, Opus 5.5 gets an advisor (the tool was skipped there before), and Sonnet 4.6 / 5 / 5.5, Haiku 5.5 and Opus 4.6 are selectable advisors. An invalid pair still falls back to the strongest valid advisor.
+- New valve ENABLE_MESSAGE_THREADS (beta, off by default): inside a tool loop the pipe sends only the new tool results instead of the whole conversation on every request, so requests get smaller. Measured with about 25k tokens of context it is not faster, and after a web search the next request writes the search result to the cache again (an API-side miss, reported to Anthropic), so it stays off unless your loops are long and search-free. Anthropic holds the conversation in memory for up to an hour (not eligible for zero data retention). Not used together with compaction; any thread error falls back to full requests.
+- OpenWebUI 0.13 puts the skill list, memories and attached knowledge after the user's message as hidden tool results. The pipe took that tool result for the user's message: retrieved file context (RAG) ended up inside the cached prefix, so every follow-up in a chat with files re-wrote the conversation instead of reading it from the prompt cache, and a newly attached full-context file was placed on the tool result. Both now go by the message the user wrote. OpenWebUI 0.12 behaves as before.
+- OpenWebUI 0.13: Tool Call Labels show on the pipe's tool calls, and the label and approval fields OpenWebUI adds to tool schemas no longer reach the tool. Tool permission mode "Auto" is honoured: a tool runs unasked only when the model marks the call as needing no approval, otherwise the pipe asks.
+- The chat migration from 0.11.0 (LEGACY_CHAT_MIGRATION) stopped with an error on OpenWebUI 0.12.4 and newer, which renamed a database call; neither the dry run nor `on` did anything there. It runs again; chatting was not affected.
+- OpenWebUI 0.13.1 Tool Search: `call_tool` now takes a batch (`calls`: list of tool_name + params). The pipe only knew the single-call form, so every deferred tool failed with "call_tool requires tool_name and params". The calls run in order; each shows as its own tool with its own result and card, as in OpenWebUI's own loop, while the API gets one call with one combined result, so the replay and the prompt cache are unchanged. OpenWebUI 0.13.0 and older keep the single-call form.
+- Tool Rich UI (HTML cards such as a weather widget) shows again in chats with output items: the embeds and files a tool returns now sit on its result item, as OpenWebUI's own connections store them. Since 0.11.0 they were dropped there.
+- OpenWebUI Tool Search: the call shows as the tool it ran (e.g. get_weather) instead of a hidden call_tool, like OpenWebUI's own loop; the replay still sends the API's call_tool.
+- Tool calls carry started_at / ended_at / duration. OpenWebUI's Stop handling uses them to tell "outcome unknown" from "not executed", its analytics show the time.
+- Without the token display (SHOW_TOKEN_COUNT `Off`) a turn ends without the "✅ Response Complete" line, like OpenWebUI's own connections. OpenWebUI's own finished statuses (e.g. retrieved sources), notices and a web search's source list stay visible.
+- Number valves show as sliders on OpenWebUI 0.12.5+ (thinking budget, max uses, retries).
+- Cache diagnostics goes out without its beta header (generally available). Requirement raised to `anthropic~=2.7`; OpenWebUI installs it when it loads the pipe.
+
+v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path)
+- Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
+- The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
+- Every tool call has an output before the stream ends, an error if the run failed, so OpenWebUI never runs one of the pipe's calls itself. When the user stops an answer, OpenWebUI marks open calls incomplete and the next turn leaves them out.
+- Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
+- In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
+- A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
 
 v0.10.3
-- Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
-- Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on.
-
-v0.10.2
-- Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
-- Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
-- The anthropic SDK logger is capped at INFO: under GLOBAL_LOG_LEVEL=DEBUG it logged every request body in full. OpenWebUI's own DEBUG logs still contain chat content; keep GLOBAL_LOG_LEVEL at INFO or above in production.
-
-v0.10.1
-- OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
-- ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
-
-v0.10.0
-- API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
-- temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
-- SDK 2.x authenticates with `Authorization: Bearer`. A custom ANTHROPIC_BASE_URL (proxy, gateway) also gets the key as `x-api-key` so gateways that read only that header keep working.
-- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it.
-- /v1/models: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (disabled or between_tools).
-- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400.
+- Streaming no longer rewrites the chat in the database on every delta. OpenWebUI stores each `replace` and `message` event by rewriting the whole chat row, so a long answer wrote a long chat hundreds of times per turn and Postgres grew until it ran out of space. Text deltas now go out as `chat:message:delta` and thinking, tool-input, code-preview and compaction re-renders as `chat:message` (both shown, not stored); the stored copy follows at most every 5 seconds and at every block end. A thinking answer went from 111 stored events to 8 (#59, reported by @icsy7867).
+- Reloading the page, reopening the tab, a dropped connection or a phone that put the browser in the background mid-stream: the answer is whole again within 2 seconds and keeps streaming. OpenWebUI's frontend only appends deltas, so a reloaded or reconnected page missed everything in between; every 2 s a delta now goes out as the full content instead. Tested in the browser for reload, tab close, offline, 10 s / 60 s freeze, stop, and reload during thinking.
+- Follow-ups no longer fail with "tool_use ids were found without tool_result blocks immediately after" when a local tool round was followed by thinking or a server tool such as web search. Replay used to end a tool round only at text and folded two rounds into one assistant message; it now ends the round at any content. A server tool the model called in the same response as a client tool stays with it (marked since v0.9.39). Chats replayed with the old structure get one prompt-cache miss (#58, reported by @yinccc999).
+- A web search in the same turn as a local tool no longer breaks the prompt cache on the next message: the tool loop sent the result's `caller: direct` field, replay rebuilt the block without it. `direct` callers are now dropped from every block, as they already were on tool_use.
+- Fast mode is no longer offered on Opus 4.8: Anthropic removes it on 2026-11-30, after which speed "fast" on claude-opus-4-8 returns an error. Opus 5.5 and Opus 5 keep it. The fast toggle filter's description now names those two.
+- Native PDF upload takes PDFs up to 64 MB on the Claude API (was 25 MB), following the request limit raised from 32 to 128 MB. A custom ANTHROPIC_BASE_URL keeps 25 MB. The size is checked before the file is read.
 
 """
 
@@ -232,6 +242,10 @@ TOOL_APPROVAL: contextvars.ContextVar[tuple] = contextvars.ContextVar(
     "anthropic_pipe_tool_approval", default=("full", None)
 )
 
+TOOL_STARTED: contextvars.ContextVar[Optional[Callable[[str], None]]] = contextvars.ContextVar(
+    "anthropic_pipe_tool_started", default=None
+)
+
 PATTERN_CODE_INTERPRETER_DETAILS = re.compile(
     r'\n?<details type="code_interpreter"[^>]*>.*?</details>\n?',
     flags=re.DOTALL,
@@ -251,6 +265,9 @@ PATTERN_TOOL_RESULT_DATA_IMAGE = re.compile(
     r"data:image/(?P<mime>jpeg|png|gif|webp);base64,(?P<data>[A-Za-z0-9+/]+=*)"
 )
 
+PATTERN_CACHE_DIAGNOSTICS_BLOCK = re.compile(
+    r'\n?<details type="cache-diagnostics">.*?</details>\n?', flags=re.DOTALL
+)
 PATTERN_ANY_DETAILS = re.compile(r"\n?<details[^>]*>.*?</details>\n?", flags=re.DOTALL)
 PATTERN_INLINE_METADATA_MARKER = re.compile(r"[ ]?\[\]\(anthropic:[^)]*\)[ ]?")
 
@@ -529,6 +546,12 @@ class StreamState:
     def reset_current_block(self) -> None:
         self.tool_use.current_block_type = None
 
+REPLACE_PERSIST_INTERVAL = 5.0
+
+CONTENT_EVENT_TYPES = ("message", "replace", "chat:message", "chat:message:delta", "chat:completion")
+
+UI_RESYNC_INTERVAL = 2.0
+
 @dataclass
 class PipeRequestContext:
 
@@ -548,12 +571,38 @@ class PipeRequestContext:
     api_tool_names: List[str] = field(default_factory=list)
     api_key: str = ""
 
+    persisted_at: float = 0.0
+    persist_pending: bool = False
+    shown_at: float = 0.0
+
+    items: Any = None
+
     async def emit_event(self, event: dict) -> None:
+        if self.items is not None and event.get("type") in CONTENT_EVENT_TYPES:
+            return
         await self.pipe.emit_event(event, self.event_emitter)
 
+    async def note(self, text: str) -> None:
+        if self.items is not None:
+            self.items.note(text)
+            self.final_message.append(text)
+            return
+        await self.emit_delta(text)
+
     async def emit_delta(self, content: str) -> None:
-        await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
+        if self.items is not None:
+            return
+        now = time.monotonic()
+        if now - self.persisted_at >= REPLACE_PERSIST_INTERVAL:
+            await self.emit_replace(self.text())
+            return
+        if now - self.shown_at >= UI_RESYNC_INTERVAL:
+            await self.emit_event({"type": "chat:message", "data": {"content": self.text()}})
+            self.shown_at = now
+        else:
+            await self.emit_event({"type": "chat:message:delta", "data": {"content": content}})
+        self.persist_pending = True
 
     async def emit_block(self, block: str) -> None:
         if (
@@ -565,12 +614,29 @@ class PipeRequestContext:
             block = "\n" + block
         await self.emit_delta(block)
 
-    async def emit_replace(self, content: str) -> None:
-        await self.emit_event({"type": "replace", "data": {"content": content}})
+    async def emit_replace(self, content: str, *, progress: bool = False) -> None:
+        if self.items is not None:
+            self.final_message[:] = [content]
+            return
+        now = time.monotonic()
+        if progress and now - self.persisted_at < REPLACE_PERSIST_INTERVAL:
+            await self.emit_event({"type": "chat:message", "data": {"content": content}})
+            self.persist_pending = True
+        else:
+            await self.emit_event({"type": "replace", "data": {"content": content}})
+            self.persisted_at = now
+            self.persist_pending = False
+        self.shown_at = now
         self.final_message.clear()
         self.final_message.append(content)
 
-    async def update_content_block(self, old_block: str, new_block: str) -> None:
+    async def flush_replace(self) -> None:
+        if self.persist_pending and self.items is None:
+            await self.emit_replace(self.text())
+
+    async def update_content_block(
+        self, old_block: str, new_block: str, *, progress: bool = False
+    ) -> None:
         if not old_block and not new_block:
 
             return
@@ -579,11 +645,11 @@ class PipeRequestContext:
             idx = text.find(old_block)
             if idx != -1:
                 text = text[:idx] + new_block + text[idx + len(old_block):]
-                await self.emit_replace(text)
+                await self.emit_replace(text, progress=progress)
                 return
 
         text = self.pipe._append_block_to_text(self.text(), new_block)
-        await self.emit_replace(text)
+        await self.emit_replace(text, progress=progress)
 
     def text(self) -> str:
         return "".join(self.final_message)
@@ -1055,7 +1121,7 @@ async def create_request_payload(
         getattr(pipe.valves, "ENABLE_CACHE_DIAGNOSTICS", False)
         and pipe.valves.CACHE_CONTROL != "cache disabled"
     ):
-        beta_headers.append("cache-diagnosis-2026-04-07")
+
         chat_id_for_diag = __metadata__.get("chat_id") if __metadata__ else None
 
         previous_message_id = None
@@ -1466,15 +1532,23 @@ class HandlerRegistry:
         block = getattr(event, "content_block", None)
         block_type = getattr(block, "type", None)
         ctx.state.tool_use.current_block_type = block_type
+        if ctx.items is not None:
+            ctx.items.on_start(event)
         return await self.for_block_type(block_type).on_start(event, ctx)
 
     async def handle_delta(self, event: Any, ctx: Any) -> bool:
+        if ctx.items is not None:
+            ctx.items.on_delta(event)
         return await self.for_block_type(ctx.state.tool_use.current_block_type).on_delta(event, ctx)
 
     async def handle_stop(self, event: Any, ctx: Any) -> bool:
         block = getattr(event, "content_block", None)
         block_type = getattr(block, "type", None) or ctx.state.tool_use.current_block_type
         handled = await self.for_block_type(block_type).on_stop(event, ctx)
+        if ctx.items is not None:
+            ctx.items.on_stop(event, ctx.pipe._api_block(block) if block is not None else None)
+
+        await ctx.flush_replace()
         ctx.state.reset_current_block()
         return handled
 
@@ -1482,6 +1556,7 @@ class StatusEmitter:
     def __init__(self, emit_event: Callable[[dict[str, Any]], Awaitable[None]]):
         self._emit_event = emit_event
         self._last_payload: dict[str, Any] | None = None
+        self._sources: dict[str, Any] | None = None
 
     async def emit(
         self,
@@ -1518,13 +1593,8 @@ class StatusEmitter:
     async def web_search_done(self, urls: list[str], query: str = "") -> None:
         if not urls:
             return
-        await self.emit(
-            "Searched {{count}} sites",
-            action="web_search",
-            urls=urls,
-            query=query,
-            count=len(urls),
-        )
+        self._sources = {"action": "web_search", "urls": urls, "query": query, "count": len(urls)}
+        await self.emit("Searched {{count}} sites", **self._sources)
 
     async def fetching_url(self, url: str = "") -> None:
         await self.emit(f"🌐 Fetching {url}" if url else "🌐 Fetching URL...")
@@ -1555,6 +1625,17 @@ class StatusEmitter:
 
     async def complete(self, description: str) -> None:
         await self.emit(description, done=True, force=True)
+
+    async def complete_quietly(self, history: list | None = None) -> None:
+        lasting = [e for e in history or [] if isinstance(e, dict) and not e.get("hidden")
+                   and (e.get("done") or e.get("action") == "web_search")]
+        last = lasting[-1] if lasting else (
+            {"description": "Searched {{count}} sites", **self._sources} if self._sources else None)
+        if last:
+            fields = {k: v for k, v in last.items() if k not in ("description", "done", "hidden")}
+            await self.emit(last.get("description", ""), done=True, force=True, **fields)
+        else:
+            await self.emit("", done=True, hidden=True, force=True)
 
     async def notification(self, content: str, *, type: str = "warning") -> None:
         await self._emit_event(
@@ -1609,7 +1690,7 @@ async def handle_thinking_delta(delta: Any, ctx: Any) -> None:
     thinking.message += thinking_text
     if thinking_text:
         formatted = ctx.pipe._format_thinking_block(thinking.message, duration=None)
-        await ctx.update_content_block(thinking.last_block, formatted)
+        await ctx.update_content_block(thinking.last_block, formatted, progress=True)
         thinking.last_block = formatted
 
 def handle_signature_delta(delta: Any, ctx: Any) -> None:
@@ -1651,7 +1732,7 @@ async def handle_compaction_delta(delta: Any, ctx: Any) -> None:
     compaction = ctx.state.compaction
     compaction.content += getattr(delta, "content", "")
     formatted = ctx.pipe._format_compaction_block(compaction.content)
-    await ctx.update_content_block(compaction.last_block, formatted)
+    await ctx.update_content_block(compaction.last_block, formatted, progress=True)
     compaction.last_block = formatted
 
 async def handle_compaction_block_stop(ctx: Any) -> None:
@@ -1699,6 +1780,48 @@ def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, st
     except (TypeError, ValueError) as error:
         return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
     return name, params, None
+
+def _owui_call_tool_batch(tool_input: Any) -> list | None:
+    if isinstance(tool_input, dict) and "calls" in tool_input:
+        return tool_input["calls"] if set(tool_input) == {"calls"} and isinstance(tool_input["calls"], list) else []
+    return None
+
+class OwuiToolBatch(list):
+
+    def combined(self, texts: list) -> str:
+        return json.dumps(
+            {"results": [{"tool_name": e["tool_name"], "status": e["status"], "output": t}
+                         for e, t in zip(self, texts)]},
+            ensure_ascii=False,
+        )
+
+async def _run_owui_call_tool_batch(entries: list, tools: dict) -> Any:
+    if not entries:
+        return "Error: call_tool requires a non-empty calls array."
+    if any(not isinstance(e, dict) or set(e) != {"tool_name", "params"} for e in entries):
+        return "Error: Each call requires tool_name and params."
+    batch = OwuiToolBatch()
+    for entry in entries:
+        name, params, error = _resolve_owui_call_tool(entry, tools)
+        tool = tools.get(name) or {}
+        params, labels, _approval = split_owui_call_metadata(params)
+        result = {"tool_name": name if not error else entry["tool_name"],
+                  "arguments": params if isinstance(params, dict) else {},
+                  "labels": labels if tool.get("display_labels") else None,
+                  "started_at": time.time()}
+        if error or not tool.get("callable"):
+            result.update(status="failed", output=error or f'Error: Tool "{name}" cannot run here.')
+        else:
+            try:
+                output = await tool["callable"](**_filter_tool_args(tool, params))
+                if isinstance(output, tuple) and output:
+                    output = output[0]
+                result.update(status="completed", output=output)
+            except Exception as e:
+                result.update(status="failed", output=f"Error: {e}")
+        result["ended_at"] = time.time()
+        batch.append(result)
+    return batch
 
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     tool_use = ctx.state.tool_use
@@ -1766,7 +1889,7 @@ async def handle_client_tool_input_delta(partial: str, ctx: Any) -> None:
     )
     text = ctx.text().replace(old_block, new_block, 1)
     tool_use.progress_blocks[tool_use.tool_id_at_start] = new_block
-    await ctx.emit_replace(text)
+    await ctx.emit_replace(text, progress=True)
 
 async def handle_tool_use_block_stop(ctx: Any) -> None:
     tool_use = ctx.state.tool_use
@@ -1802,11 +1925,41 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         tool_input = tool_call_data.get("input", {})
 
         call_tool_error = None
+        call_tool_batch = None
         if tools and (tools.get(tool_name) or {}).get("tool_id") == f"builtin:{OWUI_CALL_TOOL_NAME}":
-            tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+            call_tool_batch = _owui_call_tool_batch(tool_input)
+            if call_tool_batch is not None and len(call_tool_batch) == 1:
+                tool_input, call_tool_batch = call_tool_batch[0], None
+            if call_tool_batch and getattr(ctx, "items", None) is not None:
+
+                first, first_params, first_error = _resolve_owui_call_tool(call_tool_batch[0], tools)
+                if not first_error:
+                    first_params, _labels, _approval = split_owui_call_metadata(first_params)
+                    ctx.items.dispatched(tool_call_data.get("id"), first, first_params)
+            if call_tool_batch is None:
+                tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+                if not call_tool_error and getattr(ctx, "items", None) is not None:
+                    ctx.items.dispatched(tool_call_data.get("id"), tool_name, tool_input)
 
         tool = tools.get(tool_name) if tools else None
-        if call_tool_error:
+
+        if isinstance(tool, dict) and (tool.get("display_labels") or tool.get("approval_review")):
+            tool_input, labels, approval_required = split_owui_call_metadata(tool_input)
+            if tool_call_data.get("name") == tool_name:
+                tool_call_data["input"] = tool_input
+            if tool.get("approval_review"):
+                tool_call_data["approval_required"] = approval_required is not False
+            if labels and tool.get("display_labels") and getattr(ctx, "items", None) is not None:
+                ctx.items.call_labels(tool_call_data.get("id"), labels, tool_input)
+
+        if call_tool_batch is not None:
+            task = asyncio.create_task(
+                pipe._await_tool_task_result(
+                    tool_call_data, _run_owui_call_tool_batch(call_tool_batch, tools)
+                )
+            )
+            running_tool_tasks.append(task)
+        elif call_tool_error:
 
             async def call_tool_error_result(message=call_tool_error):
                 return message
@@ -2002,7 +2155,7 @@ async def _stream_code_preview(ctx: Any, code: str, lang: str) -> None:
     server_tool.current_code = code
     server_tool.current_lang = lang
     block = ctx.pipe._format_code_execution_block(code, lang)
-    await ctx.update_content_block(server_tool.last_block, block)
+    await ctx.update_content_block(server_tool.last_block, block, progress=True)
     server_tool.last_block = block
 
 def _shows_code_preview(server_tool: Any) -> bool:
@@ -2630,6 +2783,20 @@ class ModelPricing:
 
     RATES = {
 
+        "claude-fable-5-2": {
+            "input": 8.0,
+            "output": 40.0,
+            "cache_read": 0.20,
+            "fast_input": 16.0,
+            "fast_output": 80.0,
+        },
+        "claude-mythos-5-2": {
+            "input": 8.0,
+            "output": 40.0,
+            "cache_read": 0.20,
+            "fast_input": 16.0,
+            "fast_output": 80.0,
+        },
         "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
         "claude-mythos-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
         "claude-fable-5": {"input": 10.0, "output": 50.0},
@@ -2855,6 +3022,666 @@ class ModelPricing:
             return f"${cost:.3f}"
         return f"${cost:.4f}"
 
+ANTHROPIC_KEY = "__anthropic__"
+DETAIL_TYPE = "anthropic.block"
+DETAIL_FORMAT = "anthropic-messages-v1"
+REASONING_BLOCKS = ("thinking", "redacted_thinking")
+CALL_BLOCKS = ("tool_use", "server_tool_use", "mcp_tool_use")
+SUMMARY_LIMIT = 8000
+
+TEXT_RESYNC_SECONDS = 2.0
+_DATA_IMAGE = re.compile(r"data:image/[a-z]+;base64,[A-Za-z0-9+/]+=*")
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{os.urandom(8).hex()}"
+
+def _clone(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+def result_summary(block: dict) -> str:
+    btype = block.get("type", "")
+    content = block.get("content")
+    if isinstance(content, dict) and str(content.get("type", "")).endswith("_error"):
+        return f"Error: {content.get('error_code', 'unknown')}"
+    if btype == "web_search_tool_result" and isinstance(content, list):
+        lines = [f"- {r.get('title') or r.get('url')} ({r.get('url')})" for r in content if isinstance(r, dict)]
+        return "\n".join(lines) or "No results"
+    if btype == "web_fetch_tool_result" and isinstance(content, dict):
+        doc = content.get("content")
+        title = doc.get("title") if isinstance(doc, dict) else None
+        return f"{title or 'Fetched'}: {content.get('url', '')}"
+    if isinstance(content, dict) and ("stdout" in content or "stderr" in content):
+        text = "\n".join(p for p in (content.get("stdout"), content.get("stderr")) if p)
+        return (text or f"(no output, exit code {content.get('return_code')})")[:SUMMARY_LIMIT]
+    if btype == "tool_search_tool_result" and isinstance(content, dict):
+        names = [r.get("tool_name", "") for r in content.get("tool_references") or [] if isinstance(r, dict)]
+        return ", ".join(names) or "No tools found"
+    if isinstance(content, str):
+        return content[:SUMMARY_LIMIT]
+    if isinstance(content, list):
+        texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+        if texts:
+            return "\n".join(texts)[:SUMMARY_LIMIT]
+    if content is None:
+        return ""
+    return json.dumps(content, ensure_ascii=False, default=str)[:SUMMARY_LIMIT]
+
+def display_text(text: str) -> str:
+    return _DATA_IMAGE.sub("[image]", text or "")
+
+OWUI_CALL_METADATA = ("__labels__", "__approval__")
+
+def split_owui_call_metadata(tool_input: Any) -> tuple[Any, Optional[dict], Optional[bool]]:
+    if not isinstance(tool_input, dict) or not any(k in tool_input for k in OWUI_CALL_METADATA):
+        return tool_input, None, None
+    arguments = {k: v for k, v in tool_input.items() if k not in OWUI_CALL_METADATA}
+    labels = tool_input.get("__labels__")
+    if isinstance(labels, dict) and all(
+        isinstance(labels.get(k), str) and 0 < len(labels[k].strip()) <= 120 for k in ("running", "completed")
+    ):
+        labels = {k: labels[k].strip() for k in ("running", "completed")}
+    else:
+        labels = None
+    required = None
+    if "__approval__" in tool_input:
+        approval = tool_input["__approval__"]
+        valid = isinstance(approval, dict) and set(approval) == {"required"} and type(approval["required"]) is bool
+        required = approval["required"] if valid else True
+    return arguments, labels, required
+
+class _StoredBlock:
+
+    def __init__(self, block: dict) -> None:
+        self.index = "stored"
+        self.content_block = self
+        self.type, self.id, self.name = block.get("type"), block.get("id"), block.get("name")
+
+class ItemStream:
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.items: list[dict] = []
+        self._blocks: dict[Any, tuple] = {}
+        self._message: Optional[int] = None
+        self._calls: dict[str, dict] = {}
+        self._client_called = False
+        self._response = 0
+        self._client_responses: set = set()
+        self._attempt: tuple = (0, {}, {})
+        self.usage: dict = {}
+
+    def _emit(self, event: dict) -> None:
+        self.queue.put_nowait(_clone(event))
+
+    def _add(self, item: dict) -> int:
+        idx = len(self.items)
+        self.items.append(item)
+        self._emit({"type": "response.output_item.added", "output_index": idx, "item": item})
+        return idx
+
+    def _done(self, idx: int) -> None:
+        self._emit({"type": "response.output_item.done", "output_index": idx, "item": self.items[idx]})
+
+    def _close_message(self) -> None:
+        if self._message is None:
+            return
+        self.items[self._message]["status"] = "completed"
+        self._done(self._message)
+        self._message = None
+
+    def _open_message(self) -> int:
+        if self._message is None:
+            self._message = self._add(
+                {"id": _new_id("msg"), "type": "message", "role": "assistant", "status": "in_progress", "content": []}
+            )
+        return self._message
+
+    def begin_response(self) -> None:
+        self._close_message()
+        self._client_called = False
+        self._response += 1
+        self._blocks.clear()
+
+        self._attempt = (
+            len(self.items),
+            {cid: dict(call) for cid, call in self._calls.items()},
+            {call["idx"]: _clone(self.items[call["idx"]]) for call in self._calls.values()},
+        )
+
+    def rollback(self) -> None:
+        mark, calls, before = self._attempt
+        for idx in range(mark, len(self.items)):
+            self.items[idx] = {"id": self.items[idx].get("id") or _new_id("msg"), "type": "message",
+                               "role": "assistant", "status": "completed", "content": []}
+            self._done(idx)
+        for idx, item in before.items():
+            if self.items[idx] != item:
+                self.items[idx] = item
+                self._done(idx)
+        self._calls = calls
+        self._message = None
+        self._blocks.clear()
+        self._client_called = False
+
+    def end_response(self) -> None:
+        self._close_message()
+
+    def on_start(self, event: Any) -> None:
+        block = getattr(event, "content_block", None)
+        index = getattr(event, "index", None)
+        btype = getattr(block, "type", "") or ""
+        if btype in REASONING_BLOCKS:
+            self._close_message()
+            idx = self._add({"id": _new_id("rs"), "type": "reasoning", "status": "in_progress",
+                             "content": [], "summary": []})
+            self._blocks[index] = ("reasoning", idx, time.time())
+        elif btype == "text":
+            idx = self._open_message()
+            parts = self.items[idx]["content"]
+            parts.append({"type": "output_text", "text": "", "annotations": []})
+            self._blocks[index] = ("text", idx, len(parts) - 1, time.monotonic())
+        elif btype in CALL_BLOCKS:
+            self._close_message()
+            call_id = getattr(block, "id", "") or _new_id("call")
+            name = getattr(block, "name", "") or btype
+            idx = self._add({"id": _new_id("fc"), "type": "function_call", "call_id": call_id, "name": name,
+                             "arguments": "", "status": "in_progress"})
+            client = btype == "tool_use"
+
+            self._calls[call_id] = {"idx": idx, "client": client, "response": self._response,
+                                    "after_client": not client and self._client_called}
+            self._client_called = self._client_called or client
+            if client:
+                self._client_responses.add(self._response)
+            self._blocks[index] = ("call", idx, call_id)
+        else:
+            self._close_message()
+            self._blocks[index] = ("other", None, btype)
+
+    def on_delta(self, event: Any) -> None:
+        entry = self._blocks.get(getattr(event, "index", None))
+        delta = getattr(event, "delta", None)
+        if entry is None or delta is None:
+            return
+        kind, idx = entry[0], entry[1]
+        dtype = getattr(delta, "type", "")
+        if kind == "reasoning" and dtype == "thinking_delta":
+            text = getattr(delta, "thinking", "") or ""
+            parts = self.items[idx]["content"]
+            if not parts:
+                parts.append({"type": "reasoning_text", "text": ""})
+            parts[0]["text"] += text
+            self._emit({"type": "response.reasoning_text.delta", "item_id": self.items[idx]["id"],
+                        "output_index": idx, "content_index": 0, "delta": text})
+        elif kind == "text" and dtype == "text_delta":
+            text = getattr(delta, "text", "") or ""
+            part = self.items[idx]["content"][entry[2]]
+            part["text"] += text
+            self._emit({"type": "response.output_text.delta", "item_id": self.items[idx]["id"],
+                        "output_index": idx, "content_index": entry[2], "delta": text})
+            now = time.monotonic()
+            if now - entry[3] >= TEXT_RESYNC_SECONDS:
+                self._blocks[getattr(event, "index", None)] = (*entry[:3], now)
+                self._emit({"type": "response.output_text.done", "item_id": self.items[idx]["id"],
+                            "output_index": idx, "content_index": entry[2], "text": part["text"]})
+        elif kind == "call" and dtype == "input_json_delta":
+            text = getattr(delta, "partial_json", "") or ""
+            self.items[idx]["arguments"] += text
+            self._emit({"type": "response.function_call_arguments.delta", "item_id": self.items[idx]["id"],
+                        "output_index": idx, "delta": text})
+
+    def on_stop(self, event: Any, api_block: Optional[dict]) -> None:
+        entry = self._blocks.pop(getattr(event, "index", None), None)
+        if entry is None:
+            return
+        kind = entry[0]
+        if kind == "reasoning":
+            item = self.items[entry[1]]
+            text = (api_block or {}).get("thinking", "") or ""
+            item.update(
+                status="completed",
+                duration=max(1, round(time.time() - entry[2])),
+                content=[{"type": "reasoning_text", "text": text}] if text else [],
+                reasoning_details=[{"type": DETAIL_TYPE, "format": DETAIL_FORMAT, "block": api_block}] if api_block else [],
+            )
+            self._done(entry[1])
+        elif kind == "text":
+
+            if api_block is not None:
+                self.items[entry[1]]["content"][entry[2]]["text"] = api_block.get("text", "")
+        elif kind == "call":
+            call = self._calls.get(entry[2])
+            if call is None:
+                return
+            call["use"] = api_block
+            item = self.items[entry[1]]
+            if api_block is not None:
+
+                if "display_labels" not in item and "api_name" not in call:
+                    item["arguments"] = json.dumps(api_block.get("input", {}), ensure_ascii=False)
+
+                payload = {"v": 1, "use": api_block, **({"after_client": True} if call["after_client"] else {})}
+                item["provider_function"] = {"name": call.get("api_name", item["name"]),
+                                             "arguments": {ANTHROPIC_KEY: payload}}
+            self._done(entry[1])
+        elif kind == "other" and api_block is not None:
+            use_id = api_block.get("tool_use_id")
+            if use_id and use_id in self._calls:
+                self._finish_call(use_id, api_block, result_summary(api_block))
+            else:
+                self._inline(api_block)
+
+    def add_block(self, block: dict) -> None:
+        event = _StoredBlock(block)
+        self.on_start(event)
+        self.on_stop(event, block)
+
+    def call_labels(self, call_id: str, labels: dict, arguments: Any) -> None:
+        call = self._calls.get(call_id)
+        if call is None:
+            return
+        item = self.items[call["idx"]]
+        item["display_labels"] = labels
+        item["arguments"] = json.dumps(arguments if isinstance(arguments, dict) else {}, ensure_ascii=False)
+        self._done(call["idx"])
+
+    def dispatched(self, call_id: str, name: str, arguments: Any) -> None:
+        call = self._calls.get(call_id)
+        if call is None:
+            return
+        item = self.items[call["idx"]]
+        call.setdefault("api_name", item["name"])
+        item.update(name=name, hidden=False,
+                    arguments=json.dumps(arguments if isinstance(arguments, dict) else {}, ensure_ascii=False))
+        if "provider_function" in item:
+            item["provider_function"]["name"] = call["api_name"]
+        self._done(call["idx"])
+
+    def started(self, call_id: str) -> None:
+        call = self._calls.get(call_id)
+        if call is not None and "started_at" not in self.items[call["idx"]]:
+            self.items[call["idx"]]["started_at"] = time.time()
+            self._done(call["idx"])
+
+    def tool_result(self, call_id: str, result_block: dict, text: str,
+                    files: Optional[list] = None, embeds: Optional[list] = None) -> None:
+        if call_id in self._calls:
+            self._finish_call(call_id, result_block, display_text(text), files=files, embeds=embeds)
+
+    def batch_result(self, call_id: str, result_block: dict, shown: list) -> None:
+        if call_id not in self._calls or not shown:
+            return
+        members = []
+        for entry in shown[1:]:
+            member_id = _new_id("call")
+            item = {"id": _new_id("fc"), "type": "function_call", "call_id": member_id, "name": entry["name"],
+                    "arguments": json.dumps(entry["arguments"], ensure_ascii=False), "status": entry["status"],
+                    "hidden": False, "started_at": entry["started_at"], "ended_at": entry["ended_at"],
+                    "duration": round(entry["ended_at"] - entry["started_at"], 3),
+                    "provider_function": {"name": entry["name"],
+                                          "arguments": {ANTHROPIC_KEY: {"v": 1, "batch_of": call_id}}}}
+            if entry.get("labels"):
+                item["display_labels"] = entry["labels"]
+            self._done(self._add(item))
+            members.append((member_id, entry))
+        first = shown[0]
+        if first.get("labels"):
+            self.items[self._calls[call_id]["idx"]]["display_labels"] = first["labels"]
+
+        self._finish_call(call_id, dict(result_block), display_text(first["text"]), status=first["status"],
+                          files=first.get("files"), embeds=first.get("embeds"))
+        for member_id, entry in members:
+            self._done(self._add({"id": _new_id("fco"), "type": "function_call_output", "call_id": member_id,
+                                  "status": "completed",
+                                  "output": [{"type": "input_text", "text": display_text(entry["text"])}],
+                                  **({"files": entry["files"]} if entry.get("files") else {}),
+                                  **({"embeds": entry["embeds"]} if entry.get("embeds") else {})}))
+
+    def _finish_call(self, call_id: str, result: Optional[dict], text: str, status: str = "completed",
+                     files: Optional[list] = None, embeds: Optional[list] = None) -> None:
+        call = self._calls.pop(call_id)
+        item = self.items[call["idx"]]
+
+        if (result is not None and not call["client"] and call["response"] != self._response
+                and call["response"] in self._client_responses):
+            call["after_client"] = True
+        payload: dict = {"v": 1}
+        if result is not None:
+            result = dict(result)
+
+            if result.get("content") == text and isinstance(text, str):
+                result.pop("content")
+            payload["use"] = call.get("use")
+            payload["result"] = result
+        elif call["client"]:
+            payload["use"] = call.get("use")
+
+        if call.get("after_client"):
+            payload["after_client"] = True
+        item["status"] = status
+        if "started_at" in item:
+            item["ended_at"] = time.time()
+            item["duration"] = round(item["ended_at"] - item["started_at"], 3)
+        item["provider_function"] = {"name": call.get("api_name", item["name"]), "arguments": {ANTHROPIC_KEY: payload}}
+        self._done(call["idx"])
+        out = self._add({"id": _new_id("fco"), "type": "function_call_output", "call_id": call_id,
+                         "status": "completed", "output": [{"type": "input_text", "text": text}],
+                         **({"files": files} if files else {}), **({"embeds": embeds} if embeds else {})})
+        self._done(out)
+
+    def _inline(self, block: dict) -> None:
+        name = block.get("type", "block")
+        label = "Context compacted" if name == "compaction" else name
+        call_id = _new_id("inl")
+        idx = self._add({"id": _new_id("fc"), "type": "function_call", "call_id": call_id, "name": name,
+                         "arguments": "{}", "status": "completed",
+                         "provider_function": {"name": name, "arguments": {ANTHROPIC_KEY: {"v": 1, "use": block}}}})
+        self._done(idx)
+        out = self._add({"id": _new_id("fco"), "type": "function_call_output", "call_id": call_id,
+                         "status": "completed", "output": [{"type": "input_text", "text": label}]})
+        self._done(out)
+
+    def open_client_calls(self) -> list[str]:
+        return [cid for cid, c in self._calls.items() if c["client"]]
+
+    def note(self, text: str) -> None:
+        if not text:
+            return
+        idx = self._open_message()
+        parts = self.items[idx]["content"]
+        parts.append({"type": "output_text", "text": text, "annotations": []})
+        self._emit({"type": "response.output_text.delta", "item_id": self.items[idx]["id"],
+                    "output_index": idx, "content_index": len(parts) - 1, "delta": text})
+
+    def finish(self, reason: str = "") -> None:
+        self._close_message()
+        text = f"Not completed{': ' + reason if reason else ''}"
+        for call_id, call in list(self._calls.items()):
+            result = {"type": "tool_result", "tool_use_id": call_id, "content": text, "is_error": True}
+            self._finish_call(call_id, result if call["client"] else None, text, status="failed")
+        self._blocks.clear()
+
+    def completed(self, usage: Optional[dict] = None) -> None:
+        self._emit({"type": "response.completed",
+                    "response": {"id": _new_id("resp"), "output": [], "usage": usage or {}}})
+
+def owui_messages(items: list[dict]) -> list[dict]:
+    messages: list[dict] = []
+    content: list[str] = []
+    calls: list[dict] = []
+    details: list[dict] = []
+    outputs: list[dict] = []
+
+    def flush() -> None:
+        if content or calls or details:
+            msg: dict = {"role": "assistant", "content": "\n".join(content)}
+            if calls:
+                msg["tool_calls"] = list(calls)
+            if details:
+                msg["reasoning_details"] = list(details)
+            messages.append(msg)
+        content.clear()
+        calls.clear()
+        details.clear()
+
+    def flush_outputs() -> None:
+        if outputs:
+            flush()
+            messages.extend(outputs)
+            outputs.clear()
+
+    for item in items:
+        itype = item.get("type")
+        if itype != "function_call_output":
+            flush_outputs()
+        if itype == "message":
+            text = "".join(p.get("text", "") for p in item.get("content") or [] if p.get("type") == "output_text")
+            if text:
+                content.append(text)
+        elif itype == "function_call":
+            fn = item.get("provider_function") or item
+            args = fn.get("arguments", "{}")
+            calls.append({"id": item.get("call_id", ""), "type": "function",
+                          "function": {"name": fn.get("name", ""),
+                                       "arguments": args if isinstance(args, str) else json.dumps(args)}})
+        elif itype == "function_call_output":
+            text = "".join(p.get("text", "") for p in item.get("output") or [] if p.get("type") == "input_text")
+            outputs.append({"role": "tool", "tool_call_id": item.get("call_id", ""), "content": text})
+        elif itype == "reasoning":
+            details.extend(d for d in item.get("reasoning_details") or [] if isinstance(d, dict))
+    flush_outputs()
+    flush()
+    return messages
+
+def _loads(arguments: Any) -> Any:
+    if isinstance(arguments, dict):
+        return arguments
+    try:
+        return json.loads(arguments or "{}")
+    except (TypeError, ValueError):
+        return {}
+
+def _tool_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return ""
+
+def is_item_run_start(message: dict) -> bool:
+    return message.get("role") == "assistant" and bool(message.get("tool_calls") or message.get("reasoning_details"))
+
+def group_item_runs(messages: list[dict]) -> list[dict]:
+    grouped: list[dict] = []
+    run: Optional[list] = None
+    for msg in messages:
+        role = msg.get("role")
+        if run is not None and role in ("assistant", "tool"):
+            run.append(msg)
+            continue
+        run = None
+        if is_item_run_start(msg):
+            run = [msg]
+            grouped.append({"role": "__item_run__", "messages": run})
+        else:
+            grouped.append(msg)
+    return grouped
+
+def rebuild_run(messages: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    current: Optional[list] = None
+    results: list[dict] = []
+    carry: list[dict] = []
+    payloads: dict[str, Optional[dict]] = {}
+    dropped: set[str] = set()
+    kept: set = set()
+
+    def close() -> None:
+        nonlocal current, results
+        if current:
+            out.append({"role": "assistant", "content": current})
+        if results:
+            out.append({"role": "user", "content": results})
+        current, results = None, []
+
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant":
+            if results:
+                close()
+            if current is None:
+                current, carry = list(carry), []
+            for detail in msg.get("reasoning_details") or []:
+                if isinstance(detail, dict) and detail.get("format") == DETAIL_FORMAT and isinstance(detail.get("block"), dict):
+                    current.append(detail["block"])
+            text = msg.get("content")
+            if isinstance(text, str) and text.strip():
+                current.append({"type": "text", "text": text})
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                args = _loads(fn.get("arguments"))
+                payload = args.get(ANTHROPIC_KEY) if isinstance(args, dict) else None
+                if isinstance(payload, dict):
+                    use = payload.get("use")
+                    host = (use.get("caller") or {}).get("tool_id") if isinstance(use, dict) else None
+                    if not use or (host and host not in kept):
+
+                        dropped.add(call.get("id", ""))
+                        continue
+                    payloads[call.get("id", "")] = payload
+                    kept.add(use.get("id"))
+                    current.append(use)
+                else:
+                    payloads[call.get("id", "")] = None
+                    current.append({"type": "tool_use", "id": call.get("id", ""), "name": fn.get("name", ""),
+                                    "input": args if isinstance(args, dict) else {}})
+        elif role == "tool":
+            call_id = msg.get("tool_call_id", "")
+            if call_id in dropped:
+                continue
+            payload = payloads.get(call_id)
+            use = (payload or {}).get("use") or {}
+            if payload is None or use.get("type") == "tool_use":
+                result = dict((payload or {}).get("result") or {"type": "tool_result", "tool_use_id": call_id})
+                if "content" not in result:
+                    result["content"] = _tool_text(msg.get("content"))
+                results.append(result)
+            elif payload.get("result") and use:
+                if payload.get("after_client"):
+                    carry.append(payload["result"])
+                elif current is not None:
+                    current.append(payload["result"])
+    close()
+    if carry:
+        out.append({"role": "assistant", "content": carry})
+    return _clone(out)
+
+MESSAGE_THREADS_BETA = "message-threads-2026-08-12"
+
+def _without_cache_control(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _without_cache_control(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_control(v) for v in value]
+    return value
+
+def _fingerprint(messages: list) -> list[str]:
+    return [
+        json.dumps(_without_cache_control(m), sort_keys=True, default=str, ensure_ascii=False)
+        for m in messages
+    ]
+
+class MessageThread:
+    def __init__(self) -> None:
+        self.enabled = True
+        self.threaded = False
+        self._previous_id: Optional[str] = None
+        self._stored: list[str] = []
+        self._pending: list[str] = []
+
+    @staticmethod
+    def supports(payload: dict) -> bool:
+        return "context_management" not in payload and "context_management" not in (
+            payload.get("extra_body") or {}
+        )
+
+    def request(self, payload: dict) -> dict:
+        self.threaded = False
+        if not self.enabled or not self.supports(payload):
+            return payload
+        messages = payload.get("messages") or []
+        fingerprints = _fingerprint(messages)
+        stored = len(self._stored)
+        continues = (
+            self._previous_id is not None
+            and len(messages) > stored
+            and fingerprints[:stored] == self._stored
+
+            and messages[stored].get("role") == "assistant"
+        )
+        if continues:
+            request = {k: v for k, v in payload.items() if k not in ("system", "tools")}
+            request["messages"] = self._cached_tail(messages, stored + 1)
+            thread = {"type": "continue", "previous_message_id": self._previous_id}
+        else:
+            request = dict(payload)
+            thread = {"type": "create"}
+        betas = list(payload.get("betas") or [])
+        if MESSAGE_THREADS_BETA not in betas:
+            betas.append(MESSAGE_THREADS_BETA)
+        request["betas"] = betas
+
+        request["extra_body"] = {**(payload.get("extra_body") or {}), "thread": thread}
+        self._pending = fingerprints
+        self.threaded = True
+        return request
+
+    @staticmethod
+    def _cached_tail(messages: list, start: int) -> list:
+        new = messages[start:]
+        marker = next(
+            (
+                b["cache_control"]
+                for m in reversed(messages)
+                if isinstance(m.get("content"), list)
+                for b in m["content"]
+                if isinstance(b, dict) and b.get("cache_control")
+            ),
+            None,
+        )
+        has_marker = any(
+            isinstance(b, dict) and b.get("cache_control")
+            for m in new
+            if isinstance(m.get("content"), list)
+            for b in m["content"]
+        )
+        if marker is None or has_marker or not new or not isinstance(new[-1].get("content"), list):
+            return new
+
+        from_code = {
+            b.get("id")
+            for m in messages
+            if isinstance(m.get("content"), list)
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("caller")
+        }
+        content = list(new[-1]["content"])
+        for i in range(len(content) - 1, -1, -1):
+            block = content[i]
+            if (
+                isinstance(block, dict)
+                and block.get("type") not in ("thinking", "redacted_thinking")
+                and not block.get("caller")
+                and block.get("tool_use_id") not in from_code
+            ):
+                content[i] = {**block, "cache_control": dict(marker)}
+                return [*new[:-1], {**new[-1], "content": content}]
+        return new
+
+    def responded(self, message: Any) -> None:
+        if not self.threaded:
+            return
+        usage = getattr(message, "usage", None)
+        fallback = any(
+            getattr(i, "type", None) == "fallback_message"
+            for i in (getattr(usage, "iterations", None) or [])
+        )
+        stop_reason = getattr(message, "stop_reason", None)
+        message_id = getattr(message, "id", None)
+
+        if fallback or not message_id or stop_reason in (None, "refusal", "max_tokens"):
+            self._previous_id = None
+            self._stored = []
+            return
+        self._previous_id = message_id
+        self._stored = self._pending
+
+    def disable(self) -> None:
+        self.enabled = False
+        self.threaded = False
+        self._previous_id = None
+        self._stored = []
+
 class Pipe:
     API_VERSION = "2026-10-21"
     _DEFAULT_API_BASE = "https://api.anthropic.com"
@@ -2874,6 +3701,8 @@ class Pipe:
         "claude-mythos-5": 128000,
         "claude-fable-5-1": 128000,
         "claude-mythos-5-1": 128000,
+        "claude-fable-5-2": 128000,
+        "claude-mythos-5-2": 128000,
         "claude-haiku-5-5": 128000,
         "claude-haiku-4-5": 64000,
     }
@@ -2887,6 +3716,8 @@ class Pipe:
         "claude-mythos-5": 1000000,
         "claude-fable-5-1": 1000000,
         "claude-mythos-5-1": 1000000,
+        "claude-fable-5-2": 1000000,
+        "claude-mythos-5-2": 1000000,
         "claude-opus-4-8": 1000000,
         "claude-opus-4-7": 1000000,
         "claude-opus-4-6": 1000000,
@@ -2896,6 +3727,39 @@ class Pipe:
     }
 
     MODEL_CAPABILITY_OVERRIDES = {
+
+        "claude-fable-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
+        },
+        "claude-mythos-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
+        },
 
         "claude-fable-5-1": {
             "supports_dynamic_filtering": True,
@@ -3013,8 +3877,7 @@ class Pipe:
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
-            "supports_fast_mode": True,
-            "fast_mode_beta": True,
+
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -3073,9 +3936,21 @@ class Pipe:
             description="AWS 'Claude on AWS' workspace id. When set, sent as the 'anthropic-workspace-id' "
             "header on every request. Required when ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
         )
+        LEGACY_CHAT_MIGRATION: Literal["off", "dry-run", "on"] = Field(
+            default="dry-run",
+            description="One-time upgrade of chats written before pipe 0.11 to OpenWebUI output items. "
+            "dry-run: count what would change, on: convert, off: skip. Each runs once; the report "
+            "(anthropic_pipe_legacy_migration_*.json in OpenWebUI's data dir) is the marker, delete it to "
+            "run again. A turn is converted when the model gets the same messages afterwards; turns that "
+            "carried the cache-diagnostics block or adjacent text blocks miss the prompt cache once.",
+        )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode (Fable 5.2, Opus 5.5 / 5). Up to 2.5x faster output at higher costs",
+        )
+        ENABLE_MESSAGE_THREADS: bool = Field(
+            default=False,
+            description="Message threads (beta): inside a tool loop, send only the new tool results instead of the whole conversation on every request. Smaller requests and a faster first token in long tool loops. Anthropic keeps the conversation in memory for up to 1 hour (not eligible for zero data retention). Not used together with compaction; falls back to full requests on any thread error.",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
@@ -3118,6 +3993,7 @@ class Pipe:
             default=3,
             ge=0,
             le=50,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of retries for failed requests (due to rate limiting, transient errors or connection issues)",
         )
         CACHE_CONTROL: Literal[
@@ -3258,7 +4134,9 @@ class Pipe:
             default=8192,
             ge=1024,
             le=64000,
-            description="Thinking budget tokens",
+
+            json_schema_extra={"input": {"type": "range", "step": 1024}},
+            description="Thinking budget tokens. Only used by models without adaptive thinking (Haiku 4.5, Sonnet 4.5, Opus 4.5); newer models follow EFFORT.",
         )
         THINKING_DISPLAY: Literal["summarized", "omitted", "updates"] = Field(
             default="omitted",
@@ -3337,12 +4215,14 @@ class Pipe:
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web searches",
         )
         WEB_FETCH_MAX_USES: int = Field(
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web fetch requests per conversation turn",
         )
         WEB_SEARCH_USER_CITY: str = Field(
@@ -3394,14 +4274,20 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
+        ADVISOR_MODEL: Literal[
+            "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
+            "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+            "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1",
+            "claude-fable-5-2", "claude-mythos-5-2",
+        ] = Field(
             default="claude-opus-5",
-            description="Advisor model ID.",
+            description="Advisor model ID. The advisor must be at least as capable as the chat model; an invalid pair falls back to the strongest valid advisor. Fable 5.2 can advise every model.",
         )
         ADVISOR_MAX_USES: int = Field(
             default=0,
             ge=0,
             le=100,
+            json_schema_extra={"input": {"type": "range"}},
             description="Max advisor calls per request (0 = unlimited).",
         )
         ADVISOR_CACHING: Literal["off", "5m", "1h"] = Field(
@@ -3918,7 +4804,20 @@ class Pipe:
         if not messages:
             return
 
-        last = messages[-1]
+        at = len(messages) - 1
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            content = msg.get("content")
+            if msg.get("role") == "user" and not (
+                isinstance(content, list)
+                and content
+                and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            ):
+                if self._first_volatile_block_index(msg) is not None:
+                    at = i
+                break
+
+        last = messages[at]
         volatile_at = self._first_volatile_block_index(last)
 
         if volatile_at is None:
@@ -3931,11 +4830,11 @@ class Pipe:
             self._place_cache_on_last_cacheable_block(content[:volatile_at])
             return
 
-        if len(messages) < 2:
+        if at < 1:
 
             return
 
-        self._place_cache_on_last_cacheable_block(messages[-2].get("content", []))
+        self._place_cache_on_last_cacheable_block(messages[at - 1].get("content", []))
 
     def _convert_messages_to_claude_format(
         self, raw_messages
@@ -3947,12 +4846,31 @@ class Pipe:
         if raw_messages is None or len(raw_messages) == 0:
             return system_messages, processed_messages, previous_marker_metadata
 
+        raw_messages = group_item_runs(raw_messages)
+
+        current_user_i = max(
+            (i for i, m in enumerate(raw_messages) if m.get("role") == "user"), default=-1
+        )
+        if any(m.get("role") == "assistant" for m in raw_messages[current_user_i + 1 :]):
+            current_user_i = -1
+
         for i, msg in enumerate(raw_messages):
             role = msg.get("role")
             raw_content = msg.get("content")
 
+            if role == "__item_run__":
+                for pmsg in rebuild_run(msg["messages"]):
+                    if pmsg["role"] == "assistant":
+                        extracted_metadata = self._clean_item_run_text(pmsg)
+                        if extracted_metadata:
+                            previous_marker_metadata.extend(extracted_metadata)
+                        if not pmsg["content"]:
+                            continue
+                    processed_messages.append(pmsg)
+                continue
+
             if role == "tool":
-                tool_use_id = self._claude_tool_use_id(msg.get("tool_call_id"))
+                tool_use_id = msg.get("tool_call_id", "")
                 content_str = (
                     raw_content
                     if isinstance(raw_content, str)
@@ -3976,24 +4894,6 @@ class Pipe:
                 else:
                     processed_messages.append({"role": "user", "content": [tool_result_block]})
                 logger.debug(f"Converted role=tool → tool_result block (id={tool_use_id!r})")
-                continue
-
-            if (
-                role == "assistant"
-                and isinstance(msg.get("tool_calls"), list)
-                and msg["tool_calls"]
-            ):
-                call_blocks = self._convert_content_to_claude_format(raw_content, role=role)
-                for tool_call in msg["tool_calls"]:
-                    tool_use_block = self._openai_tool_call_to_tool_use(tool_call)
-                    if tool_use_block:
-                        call_blocks.append(tool_use_block)
-                if call_blocks:
-                    wrapped_call_msg = {"role": "assistant", "content": call_blocks}
-                    extracted_metadata = self._extract_metadata_marker_from_message(wrapped_call_msg)
-                    if extracted_metadata:
-                        previous_marker_metadata.extend(extracted_metadata)
-                    processed_messages.append(wrapped_call_msg)
                 continue
 
             if (
@@ -4043,7 +4943,7 @@ class Pipe:
 
                 processed_messages.append(wrapped_msg)
 
-                if i == len(raw_messages) - 1 and role == "user":
+                if i == current_user_i:
 
                     self._split_rag_into_trailing_block(processed_messages[-1])
 
@@ -4073,6 +4973,16 @@ class Pipe:
 
         return system_messages, processed_messages, previous_marker_metadata
 
+    def _clean_item_run_text(self, message: dict) -> list[str]:
+        for block in message["content"]:
+            if block.get("type") == "text":
+                block["text"] = PATTERN_CACHE_DIAGNOSTICS_BLOCK.sub("", block["text"])
+        extracted = self._extract_metadata_marker_from_message(message)
+        message["content"] = [
+            b for b in message["content"] if b.get("type") != "text" or b.get("text", "").strip()
+        ]
+        return extracted or []
+
     def _convert_content_to_claude_format(
         self, content: Union[str, List[dict], None], role: str = "user"
     ) -> List[dict]:
@@ -4080,126 +4990,8 @@ class Pipe:
             return []
 
         if isinstance(content, str):
-
             if role == "assistant":
-                content = PATTERN_TOOL_CALLS_DETAILS.sub("", content)
-                content = PATTERN_CODE_INTERPRETER_DETAILS.sub("", content)
-                content = PATTERN_CACHE_TRACE_DETAILS.sub("", content)
-
-                all_matches: list[tuple[int, str, re.Match]] = []
-                for m in PATTERN_REASONING_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "reasoning", m))
-                for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "server_tool_use", m))
-                for m in PATTERN_SERVER_TOOL_RESULT_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "server_tool_result", m))
-                for m in PATTERN_COMPACTION_DETAILS.finditer(content):
-                    all_matches.append((m.start(), "compaction", m))
-                for m in PATTERN_HIDDEN_BLOCK.finditer(content):
-                    all_matches.append((m.start(), "hidden", m))
-
-                if all_matches:
-
-                    standalone_results: dict[str, dict] = {}
-                    for _, kind, match in all_matches:
-                        if kind != "server_tool_result":
-                            continue
-                        attrs = dict(PATTERN_DATA_ATTR.findall(match.group(1)))
-                        payload_b64 = attrs.get("payload-b64", "")
-                        decoded = (
-                            self._decode_block_payload(payload_b64) if payload_b64 else None
-                        )
-                        if (
-                            isinstance(decoded, dict)
-                            and decoded.get("type", "").endswith("_tool_result")
-                            and decoded.get("tool_use_id")
-                        ):
-                            standalone_results[decoded["tool_use_id"]] = decoded
-                    consumed_results: set[str] = set()
-                    all_matches.sort(key=lambda t: t[0])
-                    blocks: list[dict] = []
-                    last_end = 0
-                    for _, kind, match in all_matches:
-                        text_before = content[last_end:match.start()]
-                        if text_before.strip():
-                            blocks.append({"type": "text", "text": text_before})
-                        if kind == "reasoning":
-                            attrs_str = match.group(1)
-                            sig_match = re.search(
-                                r'data-signature="([^"]*)"', attrs_str
-                            )
-                            if sig_match:
-                                signature = html.unescape(sig_match.group(1))
-                                body = match.group(2)
-                                thinking_text = html.unescape(
-                                    PATTERN_REASONING_QUOTED_LINE.sub("", body)
-                                ).strip()
-                                blocks.append({
-                                    "type": "thinking",
-                                    "thinking": thinking_text,
-                                    "signature": signature,
-                                })
-
-                        elif kind == "server_tool_use":
-                            attrs_str = match.group(1)
-                            attrs = dict(PATTERN_DATA_ATTR.findall(attrs_str))
-                            payload_b64 = attrs.get("payload-b64", "")
-                            decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
-                            if isinstance(decoded, dict) and decoded.get("type") == "server_tool_use":
-                                blocks.append(decoded)
-
-                                result_b64 = attrs.get("result-payload-b64", "")
-                                result_decoded = (
-                                    self._decode_block_payload(result_b64) if result_b64 else None
-                                )
-                                if (
-                                    isinstance(result_decoded, dict)
-                                    and result_decoded.get("type", "").endswith("_tool_result")
-                                ):
-                                    blocks.append(result_decoded)
-                                    if result_decoded.get("tool_use_id"):
-                                        consumed_results.add(result_decoded["tool_use_id"])
-                                else:
-
-                                    tool_use_id = decoded.get("id", "")
-                                    if tool_use_id in standalone_results:
-                                        blocks.append(standalone_results[tool_use_id])
-                                        consumed_results.add(tool_use_id)
-                                    else:
-                                        logger.warning(
-                                            "server_tool_use id=%r has no result carrier; "
-                                            "replaying it unpaired will 400 the request",
-                                            tool_use_id,
-                                        )
-
-                        elif kind == "server_tool_result":
-                            attrs_str = match.group(1)
-                            attrs = dict(PATTERN_DATA_ATTR.findall(attrs_str))
-                            payload_b64 = attrs.get("payload-b64", "")
-                            decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
-                            if isinstance(decoded, dict) and decoded.get("type", "").endswith("_tool_result"):
-
-                                if decoded.get("tool_use_id") not in consumed_results:
-                                    blocks.append(decoded)
-
-                        elif kind == "hidden":
-
-                            decoded = self._decode_block_payload(match.group(1))
-                            if isinstance(decoded, list):
-                                blocks.extend(
-                                    b for b in decoded if isinstance(b, dict) and b.get("type")
-                                )
-
-                        elif kind == "compaction":
-                            blocks.append({
-                                "type": "compaction",
-                                "content": match.group(1).strip(),
-                            })
-                        last_end = match.end()
-                    after = content[last_end:]
-                    if after.strip():
-                        blocks.append({"type": "text", "text": after})
-                    return blocks
+                return self._legacy_assistant_blocks(content)
 
             if content.strip():
                 return [{"type": "text", "text": content}]
@@ -4484,34 +5276,18 @@ class Pipe:
         return True
 
     @staticmethod
-    def _claude_tool_use_id(raw_id) -> str:
-        return re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_id or ""))[:64]
-
-    def _openai_tool_call_to_tool_use(self, tool_call) -> Optional[dict]:
-        if not isinstance(tool_call, dict):
-            return None
-        function = tool_call.get("function") or {}
-        tool_use_id = self._claude_tool_use_id(tool_call.get("id"))
-        name = function.get("name")
-        if not tool_use_id or not name:
-            return None
-        arguments = function.get("arguments")
-        tool_input: dict = {}
-        if isinstance(arguments, dict):
-            tool_input = arguments
-        elif isinstance(arguments, str) and arguments.strip():
-            try:
-                parsed = json.loads(arguments)
-                if isinstance(parsed, dict):
-                    tool_input = parsed
-            except (json.JSONDecodeError, ValueError):
-                logger.warning(
-                    f"Failed to parse tool_use arguments for {name!r} ({len(arguments)}c)"
-                )
-        return {"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}
-
-    @staticmethod
     def _reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                key = {"tool_use": "id", "tool_result": "tool_use_id"}.get(block.get("type"))
+                raw_id = block.get(key) if key else None
+                if raw_id and not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", str(raw_id)):
+                    block[key] = re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_id))[:64]
 
         def block_ids(msg, block_type: str, key: str) -> set:
             content = msg.get("content") if isinstance(msg, dict) else None
@@ -4603,114 +5379,6 @@ class Pipe:
                 f"block(s) kept as text, {unanswered_calls} unanswered tool_use block(s) dropped"
             )
         return reconciled
-
-    def _parse_assistant_tool_calls_string(self, content: str) -> list[dict]:
-        segments: list[tuple[str, str]] = []
-        last_end = 0
-        for m in PATTERN_TOOL_CALLS_BLOCK.finditer(content):
-            segments.append(("text", content[last_end:m.start()]))
-            segments.append(("tool_call", m.group(1)))
-            last_end = m.end()
-        segments.append(("text", content[last_end:]))
-
-        messages: list[dict] = []
-        current_assistant: list[dict] = []
-        pending_results: list[dict] = []
-
-        def flush() -> None:
-            if current_assistant:
-                messages.append({"role": "assistant", "content": list(current_assistant)})
-                current_assistant.clear()
-            if pending_results:
-                messages.append({"role": "user", "content": list(pending_results)})
-                pending_results.clear()
-
-        for kind, data in segments:
-            if kind == "text":
-
-                if not data.strip():
-                    continue
-
-                blocks = self._convert_content_to_claude_format(data, role="assistant")
-                if not blocks:
-                    continue
-
-                if pending_results and any(
-                    isinstance(b, dict) and b.get("type") == "text" for b in blocks
-                ):
-
-                    after_client_ids = {
-                        html.unescape(a.get("tool-use-id", ""))
-                        for a in (
-                            dict(PATTERN_DATA_ATTR.findall(m.group(1)))
-                            for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(data)
-                        )
-                        if a.get("after-client") == "true"
-                    }
-                    while (
-                        blocks
-                        and blocks[0].get("type") == "server_tool_use"
-                        and blocks[0].get("id") in after_client_ids
-                    ):
-                        current_assistant.append(blocks.pop(0))
-                    flush()
-                current_assistant.extend(blocks)
-            else:
-                attrs = dict(PATTERN_TOOL_CALLS_ATTRS.findall(data))
-                tc_id = html.unescape(attrs.get("id", "") or "")
-                tc_name = html.unescape(attrs.get("name", "") or "")
-                if not tc_id or not tc_name:
-                    logger.warning(
-                        "Skipping malformed <details type='tool_calls'> "
-                        "block (missing id/name) during history reconstruction"
-                    )
-                    continue
-                tc_args_raw = html.unescape(attrs.get("arguments", "") or "")
-                tc_result_raw = self._canonical_tool_result_text(html.unescape(attrs.get("result", "") or ""))
-                tc_done = (attrs.get("done", "true") or "true") == "true"
-                tc_error = (attrs.get("error", "false") or "false") == "true"
-                try:
-                    tc_input = json.loads(tc_args_raw) if tc_args_raw else {}
-                    if not isinstance(tc_input, dict):
-                        tc_input = {}
-                except (json.JSONDecodeError, ValueError):
-                    logger.warning(
-                        f"Failed to parse tool_use arguments for "
-                        f"{tc_name!r} ({len(tc_args_raw)}c)"
-                    )
-                    tc_input = {}
-                current_assistant.append({
-                    "type": "tool_use",
-                    "id": tc_id,
-                    "name": tc_name,
-                    "input": tc_input,
-                })
-                if tc_done:
-
-                    result_content = (
-                        self._convert_tool_result_content(tc_result_raw)
-                        if tc_result_raw
-                        else "(no result)"
-                    )
-                    result_block: dict = {
-                        "type": "tool_result",
-                        "tool_use_id": tc_id,
-                        "content": result_content,
-                    }
-                    if tc_error:
-                        result_block["is_error"] = True
-                else:
-
-                    result_block = {
-                        "type": "tool_result",
-                        "tool_use_id": tc_id,
-                        "content": "tool execution was interrupted",
-                        "is_error": True,
-                    }
-                pending_results.append(result_block)
-
-        flush()
-        return messages
 
     @staticmethod
     def _canonical_tool_result_text(text: str) -> str:
@@ -4832,6 +5500,380 @@ class Pipe:
                 "data": base64.b64encode(final_bytes).decode("ascii"),
             },
         }
+
+    def _legacy_assistant_blocks(self, content: str) -> List[dict]:
+
+        content = PATTERN_TOOL_CALLS_DETAILS.sub("", content)
+        content = PATTERN_CODE_INTERPRETER_DETAILS.sub("", content)
+        content = PATTERN_CACHE_TRACE_DETAILS.sub("", content)
+
+        all_matches: list[tuple[int, str, re.Match]] = []
+        for m in PATTERN_REASONING_BLOCK.finditer(content):
+            all_matches.append((m.start(), "reasoning", m))
+        for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(content):
+            all_matches.append((m.start(), "server_tool_use", m))
+        for m in PATTERN_SERVER_TOOL_RESULT_BLOCK.finditer(content):
+            all_matches.append((m.start(), "server_tool_result", m))
+        for m in PATTERN_COMPACTION_DETAILS.finditer(content):
+            all_matches.append((m.start(), "compaction", m))
+        for m in PATTERN_HIDDEN_BLOCK.finditer(content):
+            all_matches.append((m.start(), "hidden", m))
+
+        if all_matches:
+
+            standalone_results: dict[str, dict] = {}
+            for _, kind, match in all_matches:
+                if kind != "server_tool_result":
+                    continue
+                attrs = dict(PATTERN_DATA_ATTR.findall(match.group(1)))
+                payload_b64 = attrs.get("payload-b64", "")
+                decoded = (
+                    self._decode_block_payload(payload_b64) if payload_b64 else None
+                )
+                if (
+                    isinstance(decoded, dict)
+                    and decoded.get("type", "").endswith("_tool_result")
+                    and decoded.get("tool_use_id")
+                ):
+                    standalone_results[decoded["tool_use_id"]] = decoded
+            consumed_results: set[str] = set()
+            all_matches.sort(key=lambda t: t[0])
+            blocks: list[dict] = []
+            last_end = 0
+            for _, kind, match in all_matches:
+                text_before = content[last_end:match.start()]
+                if text_before.strip():
+                    blocks.append({"type": "text", "text": text_before})
+                if kind == "reasoning":
+                    attrs_str = match.group(1)
+                    sig_match = re.search(
+                        r'data-signature="([^"]*)"', attrs_str
+                    )
+                    if sig_match:
+                        signature = html.unescape(sig_match.group(1))
+                        body = match.group(2)
+                        thinking_text = html.unescape(
+                            PATTERN_REASONING_QUOTED_LINE.sub("", body)
+                        ).strip()
+                        blocks.append({
+                            "type": "thinking",
+                            "thinking": thinking_text,
+                            "signature": signature,
+                        })
+
+                elif kind == "server_tool_use":
+                    attrs_str = match.group(1)
+                    attrs = dict(PATTERN_DATA_ATTR.findall(attrs_str))
+                    payload_b64 = attrs.get("payload-b64", "")
+                    decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
+                    if isinstance(decoded, dict) and decoded.get("type") == "server_tool_use":
+                        blocks.append(decoded)
+
+                        result_b64 = attrs.get("result-payload-b64", "")
+                        result_decoded = (
+                            self._decode_block_payload(result_b64) if result_b64 else None
+                        )
+                        if (
+                            isinstance(result_decoded, dict)
+                            and result_decoded.get("type", "").endswith("_tool_result")
+                        ):
+                            blocks.append(result_decoded)
+                            if result_decoded.get("tool_use_id"):
+                                consumed_results.add(result_decoded["tool_use_id"])
+                        else:
+
+                            tool_use_id = decoded.get("id", "")
+                            if tool_use_id in standalone_results:
+                                blocks.append(standalone_results[tool_use_id])
+                                consumed_results.add(tool_use_id)
+                            else:
+                                logger.warning(
+                                    "server_tool_use id=%r has no result carrier; "
+                                    "replaying it unpaired will 400 the request",
+                                    tool_use_id,
+                                )
+
+                elif kind == "server_tool_result":
+                    attrs_str = match.group(1)
+                    attrs = dict(PATTERN_DATA_ATTR.findall(attrs_str))
+                    payload_b64 = attrs.get("payload-b64", "")
+                    decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
+                    if isinstance(decoded, dict) and decoded.get("type", "").endswith("_tool_result"):
+
+                        if decoded.get("tool_use_id") not in consumed_results:
+                            blocks.append(decoded)
+
+                elif kind == "hidden":
+
+                    decoded = self._decode_block_payload(match.group(1))
+                    if isinstance(decoded, list):
+                        blocks.extend(
+                            b for b in decoded if isinstance(b, dict) and b.get("type")
+                        )
+
+                elif kind == "compaction":
+                    blocks.append({
+                        "type": "compaction",
+                        "content": match.group(1).strip(),
+                    })
+                last_end = match.end()
+            after = content[last_end:]
+            if after.strip():
+                blocks.append({"type": "text", "text": after})
+            return blocks
+
+        if content.strip():
+            return [{"type": "text", "text": content}]
+        return []
+
+    def _parse_assistant_tool_calls_string(self, content: str) -> list[dict]:
+        segments: list[tuple[str, str]] = []
+        last_end = 0
+        for m in PATTERN_TOOL_CALLS_BLOCK.finditer(content):
+            segments.append(("text", content[last_end:m.start()]))
+            segments.append(("tool_call", m.group(1)))
+            last_end = m.end()
+        segments.append(("text", content[last_end:]))
+
+        messages: list[dict] = []
+        current_assistant: list[dict] = []
+        pending_results: list[dict] = []
+
+        def flush() -> None:
+            if current_assistant:
+                messages.append({"role": "assistant", "content": list(current_assistant)})
+                current_assistant.clear()
+            if pending_results:
+                messages.append({"role": "user", "content": list(pending_results)})
+                pending_results.clear()
+
+        for kind, data in segments:
+            if kind == "text":
+
+                if not data.strip():
+                    continue
+
+                blocks = self._convert_content_to_claude_format(data, role="assistant")
+                if not blocks:
+                    continue
+
+                if pending_results:
+
+                    after_client_ids = {
+                        html.unescape(a.get("tool-use-id", ""))
+                        for a in (
+                            dict(PATTERN_DATA_ATTR.findall(m.group(1)))
+                            for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(data)
+                        )
+                        if a.get("after-client") == "true"
+                    }
+                    while (
+                        blocks
+                        and blocks[0].get("type") == "server_tool_use"
+                        and blocks[0].get("id") in after_client_ids
+                    ):
+                        current_assistant.append(blocks.pop(0))
+                    flush()
+                current_assistant.extend(blocks)
+            else:
+                attrs = dict(PATTERN_TOOL_CALLS_ATTRS.findall(data))
+                tc_id = html.unescape(attrs.get("id", "") or "")
+                tc_name = html.unescape(attrs.get("name", "") or "")
+                if not tc_id or not tc_name:
+                    logger.warning(
+                        "Skipping malformed <details type='tool_calls'> "
+                        "block (missing id/name) during history reconstruction"
+                    )
+                    continue
+                tc_args_raw = html.unescape(attrs.get("arguments", "") or "")
+                tc_result_raw = self._canonical_tool_result_text(html.unescape(attrs.get("result", "") or ""))
+                tc_done = (attrs.get("done", "true") or "true") == "true"
+                tc_error = (attrs.get("error", "false") or "false") == "true"
+                try:
+                    tc_input = json.loads(tc_args_raw) if tc_args_raw else {}
+                    if not isinstance(tc_input, dict):
+                        tc_input = {}
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning(
+                        f"Failed to parse tool_use arguments for "
+                        f"{tc_name!r} ({len(tc_args_raw)}c)"
+                    )
+                    tc_input = {}
+                current_assistant.append({
+                    "type": "tool_use",
+                    "id": tc_id,
+                    "name": tc_name,
+                    "input": tc_input,
+                })
+                if tc_done:
+
+                    result_content = (
+                        self._convert_tool_result_content(tc_result_raw)
+                        if tc_result_raw
+                        else "(no result)"
+                    )
+                    result_block: dict = {
+                        "type": "tool_result",
+                        "tool_use_id": tc_id,
+                        "content": result_content,
+                    }
+                    if tc_error:
+                        result_block["is_error"] = True
+                else:
+
+                    result_block = {
+                        "type": "tool_result",
+                        "tool_use_id": tc_id,
+                        "content": "tool execution was interrupted",
+                        "is_error": True,
+                    }
+                pending_results.append(result_block)
+
+        flush()
+        return messages
+
+    def _legacy_items(self, text: str) -> Optional[list]:
+        if not isinstance(text, str) or "<details" not in text:
+            return None
+        messages = []
+        if '<details type="tool_calls"' in text:
+            messages = self._parse_assistant_tool_calls_string(text)
+        if not messages:
+            messages = [{"role": "assistant", "content": self._legacy_assistant_blocks(text)}]
+        items = ItemStream()
+        for message in messages:
+            if message["role"] == "assistant":
+                items.begin_response()
+                for block in message["content"]:
+                    items.add_block(block)
+                items.end_response()
+            else:
+                for block in message["content"]:
+                    if block.get("type") == "tool_result":
+                        items.tool_result(block.get("tool_use_id", ""), block, _tool_text(block.get("content")))
+        items.finish()
+        return items.items if any(i.get("type") != "message" for i in items.items) else None
+
+    @staticmethod
+    def _legacy_comparable(messages: list) -> list:
+        out = []
+        for message in messages:
+            blocks: list = []
+            for block in message["content"]:
+                block = {k: v for k, v in block.items() if k != "cache_control"}
+                if block.get("type") == "text":
+                    block["text"] = PATTERN_CACHE_DIAGNOSTICS_BLOCK.sub("", block["text"])
+                    if blocks and blocks[-1].get("type") == "text":
+                        blocks[-1]["text"] += block["text"]
+                        continue
+                blocks.append(block)
+            out.append([b for b in blocks if b.get("type") != "text" or b["text"].strip()])
+        return out
+
+    def _migrate_legacy_message(self, message: dict, convert: Callable) -> tuple[str, Optional[list]]:
+        if message.get("role") != "assistant":
+            return "skip", None
+        output = message.get("output") if isinstance(message.get("output"), list) else []
+        if any(isinstance(i, dict) and i.get("type") != "message" for i in output):
+            return "skip", None
+        replayed = (convert(output) if output else None) or [{"role": "assistant", "content": message.get("content") or ""}]
+        if len(replayed) != 1 or not isinstance(replayed[0].get("content"), str):
+            return "skip", None
+        items = self._legacy_items(replayed[0]["content"])
+        if items is None:
+            return "skip", None
+
+        def frame(middle: list) -> list:
+            return [{"role": "user", "content": "."}, *middle, {"role": "user", "content": "."}]
+
+        before = self._convert_messages_to_claude_format(frame(replayed))
+        after = self._convert_messages_to_claude_format(frame(convert(items)))
+        if before[1:] == after[1:]:
+            return "converted", items
+        if before[2] == after[2] and self._legacy_comparable(before[1]) == self._legacy_comparable(after[1]):
+            return "reflowed", items
+        return "mismatch", None
+
+    async def _migrate_legacy_chats(self, prefix: str, apply: bool) -> dict:
+        from open_webui.models.chat_messages import ChatMessages
+        from open_webui.models.chats import Chats
+        from open_webui.utils.misc import convert_output_to_messages
+
+        def convert(output: list) -> list:
+            return convert_output_to_messages(output, raw=True, reasoning_format=None, flatten_tool_images=True)
+
+        stats: dict = {"chats": 0, "skip": 0, "converted": 0, "reflowed": 0, "mismatch": 0, "written": 0, "failed": 0, "mismatches": []}
+        chat_ids: set = set()
+
+        count_by_model = getattr(ChatMessages, "get_unique_counts_by_model", None) or ChatMessages.get_message_count_by_model
+        for model_id in await count_by_model():
+            if not str(model_id).startswith(prefix + "."):
+                continue
+            skip = 0
+            while page := await ChatMessages.get_chat_ids_by_model_id(model_id, skip=skip, limit=200):
+                chat_ids.update(page)
+                skip += len(page)
+        for chat_id in sorted(chat_ids):
+            stats["chats"] += 1
+            try:
+                messages = await Chats.get_messages_map_by_chat_id(chat_id) or {}
+                chat = await Chats.get_chat_by_id(chat_id)
+                stored = (((chat.chat if chat else None) or {}).get("history") or {}).get("messages") or {}
+                changed = {}
+                for mid, message in messages.items():
+                    if not str(message.get("model", "")).startswith(prefix + "."):
+                        continue
+                    outcome, items = self._migrate_legacy_message(message, convert)
+                    stats[outcome] += 1
+                    if outcome == "mismatch" and len(stats["mismatches"]) < 50:
+                        stats["mismatches"].append(f"{chat_id}/{mid}")
+                    if items and isinstance(stored.get(mid), dict):
+                        changed[mid] = {**stored[mid], "output": items}
+                if changed and apply:
+                    if await Chats.update_chat_by_id(chat_id, {"history": {"messages": changed}}, touch=False):
+                        stats["written"] += 1
+                    else:
+                        stats["failed"] += 1
+            except Exception:
+                stats["failed"] += 1
+                logger.exception(f"Legacy migration: chat {chat_id} failed")
+            await asyncio.sleep(0)
+        return stats
+
+    def _start_legacy_migration(self, model: str) -> None:
+        mode = getattr(self.valves, "LEGACY_CHAT_MIGRATION", "off")
+        if mode == "off" or "." not in (model or "") or getattr(self, "_legacy_migration_mode", None) == mode:
+            return
+        self._legacy_migration_mode = mode
+        self._legacy_migration_task = asyncio.create_task(
+            self._run_legacy_migration(model.split(".", 1)[0], apply=mode == "on")
+        )
+
+    async def _run_legacy_migration(self, prefix: str, apply: bool) -> None:
+
+        try:
+            from open_webui.env import DATA_DIR
+        except ImportError:
+            return
+
+        done_file = os.path.join(str(DATA_DIR), f"anthropic_pipe_legacy_migration_{prefix}.json")
+        report = done_file if apply else done_file.replace(".json", ".dryrun.json")
+        if os.path.exists(done_file) or os.path.exists(report):
+            return
+        started = time.time()
+        try:
+            stats = await self._migrate_legacy_chats(prefix, apply)
+        except Exception:
+            logger.exception("Legacy chat migration failed")
+            return
+        stats["seconds"] = round(time.time() - started, 1)
+        stats["applied"] = apply
+        logger.info(f"Legacy chat migration ({'applied' if apply else 'dry run'}): "
+                    f"{ {k: v for k, v in stats.items() if k != 'mismatches'} }")
+        if stats["failed"]:
+            logger.warning(f"Legacy chat migration: {stats['failed']} chat(s) failed; delete {report} to retry")
+        with open(report, "w", encoding="utf-8") as fh:
+            json.dump({**stats, "at": int(time.time())}, fh, indent=1)
 
     def _convert_tools_to_claude_format(
         self,
@@ -5018,31 +6060,32 @@ class Pipe:
             logger.debug(f"Added web_fetch tool: {web_fetch_type}")
 
         normalized_model_name = self._normalize_model_name(actual_model_name)
-        if __user__["valves"].ENABLE_ADVISOR_TOOL and normalized_model_name == "claude-opus-5-5":
-            logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
-        elif __user__["valves"].ENABLE_ADVISOR_TOOL:
+        if __user__["valves"].ENABLE_ADVISOR_TOOL:
             executor_model = normalized_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
+            fable_52 = ["claude-fable-5-2", "claude-mythos-5-2"]
+            fable_51 = fable_52 + ["claude-fable-5-1", "claude-mythos-5-1"]
+            opus_5 = ["claude-opus-5-5", "claude-opus-5"] + fable_51 + ["claude-fable-5", "claude-mythos-5"]
+            opus_47 = opus_5 + ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5-5"]
+            sonnet_5 = opus_47 + ["claude-sonnet-5", "claude-haiku-5-5"]
             valid_advisors = {
-                "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-haiku-5-5": [
-                    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
-                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-                    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
-                ],
-                "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-5-5": [
-                    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
-                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-                ],
-                "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-8": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-5": ["claude-opus-5"],
-                "claude-fable-5": ["claude-fable-5"],
-                "claude-mythos-5": ["claude-mythos-5"],
+                "claude-fable-5-2": fable_52,
+                "claude-mythos-5-2": fable_52,
+                "claude-fable-5-1": fable_51,
+                "claude-mythos-5-1": fable_51,
+                "claude-fable-5": opus_5,
+                "claude-mythos-5": opus_5,
+                "claude-opus-5-5": opus_5,
+                "claude-opus-5": opus_5,
+                "claude-opus-4-8": opus_47,
+                "claude-opus-4-7": opus_47,
+                "claude-opus-4-6": sonnet_5 + ["claude-opus-4-6"],
+                "claude-sonnet-5-5": opus_5 + ["claude-sonnet-5-5"],
+                "claude-sonnet-5": sonnet_5,
+                "claude-sonnet-4-6": sonnet_5 + ["claude-opus-4-6", "claude-sonnet-4-6"],
+                "claude-haiku-5-5": sonnet_5,
+                "claude-haiku-4-5": sonnet_5 + ["claude-opus-4-6", "claude-sonnet-4-6"],
             }
             allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5"])
 
@@ -5240,16 +6283,18 @@ class Pipe:
                 logger.warning(f"PDF file not found on disk: {file_id}")
                 return None
 
+            if self.valves.ANTHROPIC_BASE_URL.rstrip("/") == self._DEFAULT_API_BASE:
+                max_pdf_size = 64 * 1024 * 1024
+            else:
+                max_pdf_size = 25 * 1024 * 1024
+            pdf_size = file_path.stat().st_size
+            if pdf_size > max_pdf_size:
+                logger.warning(f"PDF too large for native upload: {pdf_size} bytes")
+                return None
+
             with open(file_path, "rb") as pdf_file:
                 pdf_data = pdf_file.read()
                 encoded_data = base64.b64encode(pdf_data).decode("utf-8")
-
-            MAX_PDF_SIZE = 25 * 1024 * 1024
-            if len(pdf_data) > MAX_PDF_SIZE:
-                logger.warning(
-                    f"PDF too large for native upload: {len(pdf_data)} bytes"
-                )
-                return None
 
             logger.debug(
                 f"Successfully encoded PDF: {file_id} ({len(pdf_data)} bytes)"
@@ -5304,8 +6349,20 @@ class Pipe:
                 if fname_part:
                     prior_filename[file_id_part] = fname_part
 
-        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
-        latest_user_msg_idx = max(0, user_msg_count - 1)
+        latest_user_msg_idx = 0
+        user_msg_idx = -1
+        for m in processed_messages:
+            if m.get("role") != "user":
+                continue
+            user_msg_idx += 1
+            content = m.get("content")
+            only_tool_results = (
+                isinstance(content, list)
+                and bool(content)
+                and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            )
+            if not only_tool_results:
+                latest_user_msg_idx = user_msg_idx
 
         raw_file_msg_idx: Dict[str, int] = {}
         if raw_messages:
@@ -6091,7 +7148,10 @@ class Pipe:
 
     async def _await_tool_approval(self, tool_call_data: dict) -> tuple[bool, Any]:
         mode, event_call = TOOL_APPROVAL.get()
-        if mode != "ask" or event_call is None:
+        if mode not in ("ask", "auto") or event_call is None:
+            return True, None
+
+        if mode == "auto" and tool_call_data.get("approval_required") is False:
             return True, None
 
         name = tool_call_data.get("name", "tool")
@@ -6150,6 +7210,9 @@ class Pipe:
                 awaitable.close()
             return tool_call_data, denial, None
 
+        on_start = TOOL_STARTED.get()
+        if on_start is not None:
+            on_start(tool_call_data.get("id", ""))
         try:
             result = await asyncio.wait_for(awaitable, timeout=max(1, float(timeout_s)))
             return tool_call_data, result, None
@@ -7340,13 +8403,13 @@ class Pipe:
                 if sdk_stop == "max_tokens":
 
                     _cap = payload_for_stream.get("max_tokens")
-                    await request_ctx.emit_delta(
+                    await request_ctx.note(
                         "\n\n⚠️ Response cut off: the model hit its output limit"
                         + (f" (max_tokens = {_cap:,})" if _cap else "")
                         + ". This is not the context window — raise max_tokens for this model."
                     )
                 elif sdk_stop == "model_context_window_exceeded":
-                    await request_ctx.emit_delta("\n\n⚠️ Context window exceeded.")
+                    await request_ctx.note("\n\n⚠️ Context window exceeded.")
                 elif sdk_stop == "refusal":
                     _stop_details = getattr(sdk_final_message, "stop_details", None)
                     _category = getattr(_stop_details, "category", None) if _stop_details else None
@@ -7360,7 +8423,10 @@ class Pipe:
                     _ref_msg = f"\u26a0\ufe0f Request declined by Claude ({_cat_label})."
                     if _explanation:
                         _ref_msg += f"\n\n_{_explanation}_"
-                    await request_ctx.emit_block(_ref_msg)
+                    if request_ctx.items is not None:
+                        await request_ctx.note("\n\n" + _ref_msg)
+                    else:
+                        await request_ctx.emit_block(_ref_msg)
         elif not sdk_content:
             logger.warning(
                 f"⚠️ Empty API response (no stop_reason, no content). "
@@ -7369,7 +8435,7 @@ class Pipe:
             )
             conversation_ended = True
             if tool_loop_iteration > 1:
-                await request_ctx.emit_delta(
+                await request_ctx.note(
                     "\n\n⚠️ Code execution continuation returned empty response. "
                     "The container may have timed out."
                 )
@@ -7562,38 +8628,35 @@ class Pipe:
     def _convert_sdk_message_to_api_blocks(self, message) -> list:
         blocks = []
         for block in message.content:
-            block_dict = block.model_dump(exclude_none=True)
-            block_type = block_dict.get("type", "")
-
-            if block_type in self._SKIP_BLOCK_TYPES:
-                continue
-
-            if block_type == "compaction":
-                content = block_dict.get("content", "")
-                if content:
-                    blocks.append({"type": "compaction", "content": content})
-                continue
-
-            sanitize_keys = self._SANITIZE_BLOCK_KEYS.get(block_type)
-            if sanitize_keys is not None:
-                blocks.append({k: v for k, v in block_dict.items() if k in sanitize_keys})
-                continue
-
-            if block_type == "text":
-                block_dict.pop("citations", None)
+            block_dict = self._api_block(block)
+            if block_dict is not None:
                 blocks.append(block_dict)
-                continue
-
-            if block_type == "tool_use":
-                caller = block_dict.get("caller")
-                if caller and caller.get("type") == "direct":
-                    block_dict.pop("caller", None)
-                blocks.append(block_dict)
-                continue
-
-            blocks.append(block_dict)
-
         return blocks
+
+    def _api_block(self, block) -> Optional[dict]:
+        block_dict = block.model_dump(exclude_none=True)
+        block_type = block_dict.get("type", "")
+
+        if block_type in self._SKIP_BLOCK_TYPES:
+            return None
+
+        if block_type == "compaction":
+            content = block_dict.get("content", "")
+            return {"type": "compaction", "content": content} if content else None
+
+        sanitize_keys = self._SANITIZE_BLOCK_KEYS.get(block_type)
+        if sanitize_keys is not None:
+            return {k: v for k, v in block_dict.items() if k in sanitize_keys}
+
+        if block_type == "text":
+            block_dict.pop("citations", None)
+            return block_dict
+
+        caller = block_dict.get("caller")
+        if isinstance(caller, dict) and caller.get("type") == "direct":
+            block_dict.pop("caller", None)
+
+        return block_dict
 
     async def pipe(
         self,
@@ -7608,8 +8671,82 @@ class Pipe:
         __request__: Optional[Any] = None,
         __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
     ):
+        args = dict(
+            body=body, __user__=__user__, __event_emitter__=__event_emitter__, __metadata__=__metadata__,
+            __tools__=__tools__, __files__=__files__, __task__=__task__, __task_body__=__task_body__,
+            __request__=__request__, __event_call__=__event_call__,
+        )
+        self._start_legacy_migration(str(body.get("model") or ""))
+        if not self._streams_items(body, __event_emitter__, __metadata__, __task__, __request__):
+            logger.debug("pipe(): text mode")
+            return await self._pipe_run(**args)
+        logger.debug("pipe(): output item mode")
+        items = ItemStream()
+        return self._item_events(items, self._pipe_run(**args, __items__=items))
+
+    @staticmethod
+    def _streams_items(body: dict, event_emitter: Any, metadata: Optional[dict], task: Any, request: Any) -> bool:
+        metadata = metadata or {}
+        chat_id = str(metadata.get("chat_id") or "")
+        internal = request is not None and getattr(getattr(request, "state", None), "internal", False) is True
+        return bool(
+            body.get("stream", True)
+            and event_emitter is not None
+            and not task
+            and chat_id
+            and metadata.get("message_id")
+            and not chat_id.startswith("channel:")
+            and not internal
+            and not _owui_version_below((0, 12, 2))
+        )
+
+    async def _item_events(self, items: Any, run: Any):
+        task = asyncio.ensure_future(run)
+        try:
+            while not (task.done() and items.queue.empty()):
+                getter = asyncio.ensure_future(items.queue.get())
+                done, _ = await asyncio.wait({getter, task}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    yield getter.result()
+                else:
+                    getter.cancel()
+            failed = ""
+            try:
+                result = task.result()
+            except Exception as e:
+
+                self.logger.exception("Pipe run failed while streaming items")
+                result, failed = None, "error"
+                items.note(f"\n\nError: {e}")
+
+            if not items.items and isinstance(result, str) and result.strip():
+                items.note(result)
+            items.finish(failed)
+            items.completed(items.usage)
+            while not items.queue.empty():
+                yield items.queue.get_nowait()
+        finally:
+            if not task.done():
+                task.cancel()
+
+    async def _pipe_run(
+        self,
+        body: dict[str, Any],
+        __user__: Dict[str, Any],
+        __event_emitter__: Callable[[Dict[str, Any]], Awaitable[None]],
+        __metadata__: dict[str, Any] = {},
+        __tools__: Optional[Dict[str, Dict[str, Any]]] = None,
+        __files__: Optional[Dict[str, Any]] = None,
+        __task__: Optional[dict[str, Any]] = None,
+        __task_body__: Optional[dict[str, Any]] = None,
+        __request__: Optional[Any] = None,
+        __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
+        __items__: Any = None,
+    ):
 
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
+        request_ctx.items = __items__
+        TOOL_STARTED.set(__items__.started if __items__ is not None else None)
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event
         emit_message_delta = request_ctx.emit_delta
@@ -7819,6 +8956,11 @@ class Pipe:
             await status.waiting()
 
             tool_loop_iteration = 0
+
+            items_base = len(payload_for_stream["messages"])
+            message_thread = MessageThread()
+            if not getattr(self.valves, "ENABLE_MESSAGE_THREADS", False):
+                message_thread.disable()
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -7863,8 +9005,20 @@ class Pipe:
                         if payload_for_stream.get("speed") == "fast"
                         else client
                     )
+                    if request_ctx.items is not None:
+                        request_ctx.items.begin_response()
+                    _request = message_thread.request(payload_for_stream)
+                    if message_thread.threaded:
+                        logger.debug(
+                            "[THREAD run=%s] iter=%d %s, %d of %d message(s) sent",
+                            run_id,
+                            tool_loop_iteration,
+                            _request["extra_body"]["thread"]["type"],
+                            len(_request["messages"]),
+                            len(payload_for_stream["messages"]),
+                        )
                     async with _stream_client.beta.messages.stream(
-                        **payload_for_stream
+                        **_request
                     ) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
@@ -7959,13 +9113,20 @@ class Pipe:
                                     if delta_container_id:
                                         current_container_id = payload_for_stream.get("container")
                                         if current_container_id != delta_container_id:
-                                            text_state.chunk += self._create_metadata_marker(
+                                            _container_marker = self._create_metadata_marker(
                                                 "container_id",
                                                 delta_container_id,
                                                 messagenum=len(
                                                     payload_for_stream.get("messages", [])
                                                 ),
                                             )
+                                            if request_ctx.items is not None:
+
+                                                if not isinstance(new_marker_metadata, list):
+                                                    new_marker_metadata = list(new_marker_metadata or [])
+                                                new_marker_metadata.append(_container_marker)
+                                            else:
+                                                text_state.chunk += _container_marker
                                             logger.debug(
                                                 f"📦 Container ID from message_delta: {delta_container_id}"
                                             )
@@ -8023,7 +9184,35 @@ class Pipe:
 
                                                 tool_result_embeds = []
                                                 tool_result_files = []
-                                                if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+
+                                                batch_shown = None
+                                                if isinstance(tool_result, OwuiToolBatch):
+                                                    batch_shown = []
+                                                    for entry in tool_result:
+                                                        text, files, embeds = entry["output"], [], []
+                                                        if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                            try:
+                                                                text, files, embeds = await process_tool_result(
+                                                                    __request__, entry["tool_name"], entry["output"],
+                                                                    "pipe", metadata=__metadata__, user=__user__,
+                                                                )
+                                                            except Exception as e:
+                                                                logger.warning(f"process_tool_result failed for '{entry['tool_name']}': {e}")
+                                                        if not isinstance(text, str):
+                                                            try:
+                                                                text = json.dumps(text, ensure_ascii=False)
+                                                            except (TypeError, ValueError):
+                                                                text = str(text)
+                                                        batch_shown.append({
+                                                            "name": entry["tool_name"], "arguments": entry["arguments"],
+                                                            "labels": entry["labels"], "status": entry["status"],
+                                                            "text": text, "files": files or [], "embeds": embeds or [],
+                                                            "started_at": entry["started_at"], "ended_at": entry["ended_at"],
+                                                        })
+                                                    tool_result = tool_result.combined([s["text"] for s in batch_shown])
+                                                    tool_result_files = [f for s in batch_shown for f in s["files"]]
+                                                    tool_result_embeds = [e for s in batch_shown for e in s["embeds"]]
+                                                elif PROCESS_TOOL_RESULT_AVAILABLE and __request__:
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
                                                             await process_tool_result(
@@ -8071,6 +9260,13 @@ class Pipe:
                                                 if is_error:
                                                     result_block["is_error"] = True
                                                 tool_calls.append(result_block)
+                                                if request_ctx.items is not None and batch_shown:
+                                                    request_ctx.items.batch_result(tool_use_id, result_block, batch_shown)
+                                                elif request_ctx.items is not None:
+                                                    request_ctx.items.tool_result(
+                                                        tool_use_id, result_block, result_str,
+                                                        files=tool_result_files, embeds=tool_result_embeds,
+                                                    )
 
                                                 if server_tool_state.in_code_execution:
 
@@ -8124,6 +9320,8 @@ class Pipe:
                                                         "is_error": True,
                                                     }
                                                 )
+                                                if request_ctx.items is not None:
+                                                    request_ctx.items.tool_result(tool_use_id, tool_calls[-1], error_result)
                                                 completed = self._format_tool_result_block(
                                                     tool_use_id,
                                                     "unknown",
@@ -8150,11 +9348,15 @@ class Pipe:
                                 elif stop_reason == "max_tokens":
 
                                     _cap = payload_for_stream.get("max_tokens")
-                                    text_state.chunk += (
+                                    _cut_note = (
                                         "\n\n⚠️ Response cut off: the model hit its output limit"
                                         + (f" (max_tokens = {_cap:,})" if _cap else "")
                                         + ". This is not the context window — raise max_tokens for this model."
                                     )
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note(_cut_note)
+                                    else:
+                                        text_state.chunk += _cut_note
 
                                     conversation_ended = True
                                 elif stop_reason == "end_turn":
@@ -8180,13 +9382,22 @@ class Pipe:
                                     if _explanation:
                                         _ref_msg += f"\n\n_{_explanation}_"
                                     logger.info(f"\U0001f6ab Refusal: category={_category!r} explanation={len(_explanation or '')}c")
-                                    text_state.chunk += _ref_msg
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note(_ref_msg)
+                                    else:
+                                        text_state.chunk += _ref_msg
                                     conversation_ended = True
                                 elif stop_reason == "stop_sequence":
-                                    text_state.chunk += "Claude stopped generating based on stop sequence."
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note("Claude stopped generating based on stop sequence.")
+                                    else:
+                                        text_state.chunk += "Claude stopped generating based on stop sequence."
                                     conversation_ended = True
                                 elif stop_reason == "model_context_window_exceeded":
-                                    text_state.chunk += "Claude has reached the maximum context window for this model."
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note("Claude has reached the maximum context window for this model.")
+                                    else:
+                                        text_state.chunk += "Claude has reached the maximum context window for this model."
                                     conversation_ended = True
                                 elif stop_reason == "compaction":
 
@@ -8220,6 +9431,9 @@ class Pipe:
                                     text_state.chunk_count = 0
 
                         sdk_final_message = stream.current_message_snapshot
+                    message_thread.responded(sdk_final_message)
+                    if request_ctx.items is not None:
+                        request_ctx.items.end_response()
 
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -8290,7 +9504,7 @@ class Pipe:
                                     },
                                 }
                             )
-                            await emit_message_delta(
+                            await request_ctx.note(
                                 f"\n\n⚠️ **Tool call limit reached** ({current_function_calls}/{max_function_calls}). Some tool results may not have been processed. You can increase the limit in the model's valve settings."
                             )
                             break
@@ -8376,6 +9590,19 @@ class Pipe:
                                             f"content_size={_clen}c"
                                         )
 
+                        if request_ctx.items is not None:
+                            for missing_id in request_ctx.items.open_client_calls():
+                                missing = "Error: tool execution failed - no result was produced"
+                                request_ctx.items.tool_result(
+                                    missing_id,
+                                    {"type": "tool_result", "tool_use_id": missing_id, "content": missing, "is_error": True},
+                                    missing,
+                                )
+
+                            payload_for_stream["messages"][items_base:] = rebuild_run(
+                                owui_messages(request_ctx.items.items)
+                            )
+
                         if not assistant_content and not user_content:
                             logger.debug(
                                 f"🔧 No valid content to add, ending conversation"
@@ -8448,6 +9675,10 @@ class Pipe:
                                 payload_for_stream["messages"].append(
                                     {"role": "assistant", "content": assistant_content}
                                 )
+                        if request_ctx.items is not None:
+                            payload_for_stream["messages"][items_base:] = rebuild_run(
+                                owui_messages(request_ctx.items.items)
+                            )
                         has_pending_tool_calls = False
                         sdk_final_message = None
                         text_state.reset_for_iteration()
@@ -8481,19 +9712,28 @@ class Pipe:
                             server_tool_state.reset_for_retry()
                             request_ctx.state.reset_current_block()
 
+                            if request_ctx.items is not None:
+                                request_ctx.items.rollback()
                             continue
                         else:
                             logger.error(
                                 f"❌ Truncated stream: max retries ({self.valves.MAX_RETRIES}) exhausted. "
                                 f"Returning error to user."
                             )
-                            await request_ctx.emit_delta(
+                            await request_ctx.note(
                                 "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
                                 f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
                             )
                     break
 
                 except Exception as e:
+
+                    if message_thread.threaded and isinstance(e, (BadRequestError, NotFoundError)):
+                        logger.warning(f"[THREAD] threaded request rejected, sending the full conversation: {e}")
+                        message_thread.disable()
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
+                        continue
 
                     _thinking_cfg = payload_for_stream.get("thinking")
                     if (
@@ -8516,6 +9756,8 @@ class Pipe:
                         if "thinking-binding-controls-2026-08-01" not in _betas:
                             _betas.append("thinking-binding-controls-2026-08-01")
                         payload_for_stream["betas"] = _betas
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
 
                     _err = str(e).lower()
@@ -8536,6 +9778,8 @@ class Pipe:
                             "answering without it. Turn off the WEB_FETCH valve to skip this retry.",
                             type="warning",
                         )
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
 
                     if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":
@@ -8550,6 +9794,8 @@ class Pipe:
                             "falling back to standard speed.",
                             type="warning",
                         )
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
 
                     await _finalize_open_code_block(request_ctx)
@@ -8560,8 +9806,12 @@ class Pipe:
                         request_ctx=request_ctx,
                     )
                     if should_retry:
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
                     if response_suffix:
+                        if request_ctx.items is not None:
+                            await request_ctx.note(response_suffix)
                         return final_text() + response_suffix
                     return final_text()
         except asyncio.CancelledError:
@@ -8600,7 +9850,9 @@ class Pipe:
                 total_usage["cost_breakdown_usd"] = cost_breakdown
 
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
-        if include_usage and show_token_setting != "Off" and total_usage and not is_internal:
+
+        shows_usage = bool(include_usage and show_token_setting != "Off" and total_usage and not is_internal)
+        if shows_usage:
             def format_num(n: int) -> str:
                 if n >= 1_000_000:
                     return f"{n/1_000_000:.1f}M"
@@ -8732,13 +9984,15 @@ class Pipe:
                             _already,
                             all_request_ids,
                         )
-                    await request_ctx.emit_delta(diag_block)
+                    await request_ctx.note(diag_block)
             except Exception as e:
                 logger.warning(f"[CACHE-DIAG] failed to emit diagnostics block: {e}")
 
         if new_marker_metadata and not is_internal:
             marker_text = "".join(new_marker_metadata) if isinstance(new_marker_metadata, list) else str(new_marker_metadata)
-            if marker_text:
+            if marker_text and request_ctx.items is not None:
+                await request_ctx.note(marker_text)
+            elif marker_text:
                 final_message.append(marker_text)
                 logger.debug("Persisted %d metadata marker char(s)", len(marker_text))
 
@@ -8756,14 +10010,32 @@ class Pipe:
                 {"type": "replace", "data": {"content": consolidated}}
             )
 
-        await status.complete(final_status)
+        if shows_usage:
+            await status.complete(final_status)
+        else:
+
+            history = None
+            if __metadata__ and __metadata__.get("chat_id") and __metadata__.get("message_id"):
+                try:
+                    from open_webui.models.chats import Chats
+
+                    stored = await Chats.get_message_by_id_and_message_id(
+                        __metadata__["chat_id"], __metadata__["message_id"]
+                    )
+                    history = (stored or {}).get("statusHistory")
+                except Exception as e:
+                    logger.debug(f"statusHistory lookup failed: {e}")
+            await status.complete_quietly(history)
 
         done_data: dict = {"choices": [{"finish_reason": "stop", "delta": {"content": ""}}], "done": True}
         if include_usage and total_usage:
             done_data["usage"] = self._public_usage(total_usage)
         await emit_event_local({"type": "chat:completion", "data": done_data})
 
-        if include_usage and total_usage and CHATS_AVAILABLE and __metadata__:
+        if request_ctx.items is not None:
+
+            request_ctx.items.usage = self._public_usage(total_usage) if include_usage and total_usage else {}
+        elif include_usage and total_usage and CHATS_AVAILABLE and __metadata__:
             chat_id = __metadata__.get("chat_id")
             message_id = __metadata__.get("message_id")
             if chat_id and message_id and not str(chat_id).startswith("local:"):

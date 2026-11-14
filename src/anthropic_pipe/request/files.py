@@ -45,18 +45,23 @@ class PipeRequestFilesMethods:
                 logger.warning(f"PDF file not found on disk: {file_id}")
                 return None
 
-            # Read and encode the PDF
+            # Request size limit: 128 MB on the first-party Claude API since
+            # 2026-10-28, 20-32 MB on proxies and partner platforms. base64 adds
+            # a third and the rest of the conversation shares the request.
+            # ponytail: per-file cap only; several large PDFs in one chat can
+            # still add up past the limit (API answers 413).
+            if self.valves.ANTHROPIC_BASE_URL.rstrip("/") == self._DEFAULT_API_BASE:
+                max_pdf_size = 64 * 1024 * 1024
+            else:
+                max_pdf_size = 25 * 1024 * 1024
+            pdf_size = file_path.stat().st_size
+            if pdf_size > max_pdf_size:
+                logger.warning(f"PDF too large for native upload: {pdf_size} bytes")
+                return None
+
             with open(file_path, "rb") as pdf_file:
                 pdf_data = pdf_file.read()
                 encoded_data = base64.b64encode(pdf_data).decode("utf-8")
-
-            # Check size limits (Anthropic has 32MB request limit, be conservative)
-            MAX_PDF_SIZE = 25 * 1024 * 1024  # 25 MB
-            if len(pdf_data) > MAX_PDF_SIZE:
-                logger.warning(
-                    f"PDF too large for native upload: {len(pdf_data)} bytes"
-                )
-                return None
 
             logger.debug(
                 f"Successfully encoded PDF: {file_id} ({len(pdf_data)} bytes)"
@@ -132,8 +137,25 @@ class PipeRequestFilesMethods:
                 if fname_part:
                     prior_filename[file_id_part] = fname_part
 
-        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
-        latest_user_msg_idx = max(0, user_msg_count - 1)
+        # The latest message the user wrote. OpenWebUI 0.13 puts hidden tool
+        # results (skill list, memories, attached knowledge) after it, which
+        # arrive as a user message of tool_result blocks: a file does not belong
+        # there. Indexes still count every user-role message, so anchors stored
+        # by earlier versions keep pointing at the same message.
+        latest_user_msg_idx = 0
+        user_msg_idx = -1
+        for m in processed_messages:
+            if m.get("role") != "user":
+                continue
+            user_msg_idx += 1
+            content = m.get("content")
+            only_tool_results = (
+                isinstance(content, list)
+                and bool(content)
+                and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            )
+            if not only_tool_results:
+                latest_user_msg_idx = user_msg_idx
 
         raw_file_msg_idx: Dict[str, int] = {}
         if raw_messages:

@@ -4,9 +4,9 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.5
+version: 0.11.2
 license: MIT
-requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
+requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -32,39 +32,49 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5.5 / 5 / 4.8
+- Fast Mode for Fable 5.2 and Opus 5.5 / 5
+- Message threads for tool loops (beta, optional)
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 - Per-message Effort override that preserves the prompt cache
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
-v0.10.5
-- Fixed a 400 ("unexpected tool_use_id found in tool_result blocks") on chats with Open Terminal or skills enabled. OpenWebUI hands the pipe its own hidden tool calls (terminal skill manifest, memory recall, attached knowledge) as an assistant message with OpenAI-style `tool_calls` plus `role: tool` answers; the pipe dropped the assistant half as empty and sent the answers as orphaned `tool_result` blocks. `tool_calls` now become `tool_use` blocks, and the same applies to tool turns an earlier model ran in the same chat. A final pairing check keeps one broken history entry from making a chat unusable: an orphaned result is kept as text, an unanswered call is dropped, and valid histories pass through unchanged so the prompt cache is unaffected.
+v0.11.2
+- Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1 / 5.2, Mythos 5.1 / 5.2). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
+- Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1/5.2, Mythos 5/5.1/5.2. `task_budget` goes out unchanged ({type, total}) on every request and the server keeps the countdown: this pipe resends the full history on each tool-loop request, and a lowered `remaining` would under-report the budget and invalidate the prompt-cache prefix.
+- A final pairing check keeps one broken history entry from making a chat unusable (the API rejects a tool_result without its tool_use, and the reverse, with a 400 that repeats on every message): an orphaned result is kept as text, an unanswered call is dropped, a tool id Anthropic would reject (it allows only letters, digits, _ and -) is mapped to a valid one on both the call and its result, and valid histories pass through unchanged so the prompt cache is unaffected.
 
-v0.10.4
-- Task Budgets no longer send `remaining`. v0.10.3 lowered it on every tool loop request after the first; this pipe resends the full history each time, so that under-reported the budget (the model wrapped up earlier than the budget allowed) and the changing value invalidated the prompt-cache prefix. `task_budget` now goes out unchanged ({type, total}) and the server keeps the countdown, as Anthropic recommends for loops that resend full history.
+v0.11.1
+- Claude Fable 5.2 and Mythos 5.2: model data, prices ($8 / $40 per MTok, fast mode $16 / $80) and fast mode, which needs no beta header there. Thinking cannot be switched off on them; with the thinking toggle off the pipe sends effort `low`, as on Opus 5.5.
+- Advisor pairs follow Anthropic's current table: Fable 5.2 can advise every model, a Fable 5.2 chat model takes only Fable / Mythos 5.2, Opus 5.5 gets an advisor (the tool was skipped there before), and Sonnet 4.6 / 5 / 5.5, Haiku 5.5 and Opus 4.6 are selectable advisors. An invalid pair still falls back to the strongest valid advisor.
+- New valve ENABLE_MESSAGE_THREADS (beta, off by default): inside a tool loop the pipe sends only the new tool results instead of the whole conversation on every request, so requests get smaller. Measured with about 25k tokens of context it is not faster, and after a web search the next request writes the search result to the cache again (an API-side miss, reported to Anthropic), so it stays off unless your loops are long and search-free. Anthropic holds the conversation in memory for up to an hour (not eligible for zero data retention). Not used together with compaction; any thread error falls back to full requests.
+- OpenWebUI 0.13 puts the skill list, memories and attached knowledge after the user's message as hidden tool results. The pipe took that tool result for the user's message: retrieved file context (RAG) ended up inside the cached prefix, so every follow-up in a chat with files re-wrote the conversation instead of reading it from the prompt cache, and a newly attached full-context file was placed on the tool result. Both now go by the message the user wrote. OpenWebUI 0.12 behaves as before.
+- OpenWebUI 0.13: Tool Call Labels show on the pipe's tool calls, and the label and approval fields OpenWebUI adds to tool schemas no longer reach the tool. Tool permission mode "Auto" is honoured: a tool runs unasked only when the model marks the call as needing no approval, otherwise the pipe asks.
+- The chat migration from 0.11.0 (LEGACY_CHAT_MIGRATION) stopped with an error on OpenWebUI 0.12.4 and newer, which renamed a database call; neither the dry run nor `on` did anything there. It runs again; chatting was not affected.
+- OpenWebUI 0.13.1 Tool Search: `call_tool` now takes a batch (`calls`: list of tool_name + params). The pipe only knew the single-call form, so every deferred tool failed with "call_tool requires tool_name and params". The calls run in order; each shows as its own tool with its own result and card, as in OpenWebUI's own loop, while the API gets one call with one combined result, so the replay and the prompt cache are unchanged. OpenWebUI 0.13.0 and older keep the single-call form.
+- Tool Rich UI (HTML cards such as a weather widget) shows again in chats with output items: the embeds and files a tool returns now sit on its result item, as OpenWebUI's own connections store them. Since 0.11.0 they were dropped there.
+- OpenWebUI Tool Search: the call shows as the tool it ran (e.g. get_weather) instead of a hidden call_tool, like OpenWebUI's own loop; the replay still sends the API's call_tool.
+- Tool calls carry started_at / ended_at / duration. OpenWebUI's Stop handling uses them to tell "outcome unknown" from "not executed", its analytics show the time.
+- Without the token display (SHOW_TOKEN_COUNT `Off`) a turn ends without the "✅ Response Complete" line, like OpenWebUI's own connections. OpenWebUI's own finished statuses (e.g. retrieved sources), notices and a web search's source list stay visible.
+- Number valves show as sliders on OpenWebUI 0.12.5+ (thinking budget, max uses, retries).
+- Cache diagnostics goes out without its beta header (generally available). Requirement raised to `anthropic~=2.7`; OpenWebUI installs it when it loads the pipe.
+
+v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path)
+- Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
+- The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
+- Every tool call has an output before the stream ends, an error if the run failed, so OpenWebUI never runs one of the pipe's calls itself. When the user stops an answer, OpenWebUI marks open calls incomplete and the next turn leaves them out.
+- Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
+- In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
+- A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
 
 v0.10.3
-- Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
-- Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on.
-
-v0.10.2
-- Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
-- Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
-- The anthropic SDK logger is capped at INFO: under GLOBAL_LOG_LEVEL=DEBUG it logged every request body in full. OpenWebUI's own DEBUG logs still contain chat content; keep GLOBAL_LOG_LEVEL at INFO or above in production.
-
-v0.10.1
-- OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
-- ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
-
-v0.10.0
-- API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
-- temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
-- SDK 2.x authenticates with `Authorization: Bearer`. A custom ANTHROPIC_BASE_URL (proxy, gateway) also gets the key as `x-api-key` so gateways that read only that header keep working.
-- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it.
-- /v1/models: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (disabled or between_tools).
-- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400.
+- Streaming no longer rewrites the chat in the database on every delta. OpenWebUI stores each `replace` and `message` event by rewriting the whole chat row, so a long answer wrote a long chat hundreds of times per turn and Postgres grew until it ran out of space. Text deltas now go out as `chat:message:delta` and thinking, tool-input, code-preview and compaction re-renders as `chat:message` (both shown, not stored); the stored copy follows at most every 5 seconds and at every block end. A thinking answer went from 111 stored events to 8 (#59, reported by @icsy7867).
+- Reloading the page, reopening the tab, a dropped connection or a phone that put the browser in the background mid-stream: the answer is whole again within 2 seconds and keeps streaming. OpenWebUI's frontend only appends deltas, so a reloaded or reconnected page missed everything in between; every 2 s a delta now goes out as the full content instead. Tested in the browser for reload, tab close, offline, 10 s / 60 s freeze, stop, and reload during thinking.
+- Follow-ups no longer fail with "tool_use ids were found without tool_result blocks immediately after" when a local tool round was followed by thinking or a server tool such as web search. Replay used to end a tool round only at text and folded two rounds into one assistant message; it now ends the round at any content. A server tool the model called in the same response as a client tool stays with it (marked since v0.9.39). Chats replayed with the old structure get one prompt-cache miss (#58, reported by @yinccc999).
+- A web search in the same turn as a local tool no longer breaks the prompt cache on the next message: the tool loop sent the result's `caller: direct` field, replay rebuilt the block without it. `direct` callers are now dropped from every block, as they already were on tool_use.
+- Fast mode is no longer offered on Opus 4.8: Anthropic removes it on 2026-11-30, after which speed "fast" on claude-opus-4-8 returns an error. Opus 5.5 and Opus 5 keep it. The fast toggle filter's description now names those two.
+- Native PDF upload takes PDFs up to 64 MB on the Claude API (was 25 MB), following the request limit raised from 32 to 128 MB. A custom ANTHROPIC_BASE_URL keeps 25 MB. The size is checked before the file is read.
 
 """
 
@@ -358,6 +368,12 @@ SLIM_OUTPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
 TOOL_APPROVAL: contextvars.ContextVar[tuple] = contextvars.ContextVar(
     "anthropic_pipe_tool_approval", default=("full", None)
 )
+# Called with the tool_use id when a client tool starts running (after approval).
+# Item mode stamps `started_at` on the call: OpenWebUI's Stop handler reads it to
+# tell "outcome unknown" from "not executed", its analytics show the duration.
+TOOL_STARTED: contextvars.ContextVar[Optional[Callable[[str], None]]] = contextvars.ContextVar(
+    "anthropic_pipe_tool_started", default=None
+)
 
 # Pattern to strip OpenWebUI <details type="code_interpreter"> blocks from conversation history.
 PATTERN_CODE_INTERPRETER_DETAILS = re.compile(
@@ -395,6 +411,11 @@ PATTERN_TOOL_RESULT_DATA_IMAGE = re.compile(
 # reason around. The memory reviewer is the worst case — it truncates each
 # message to 1600 characters, so a cache-diagnostics dump can crowd out the
 # actual conversation it is supposed to review.
+# The cache-diagnostics block (ENABLE_CACHE_DIAGNOSTICS) the pipe appends to a
+# turn's text; never part of what the model said.
+PATTERN_CACHE_DIAGNOSTICS_BLOCK = re.compile(
+    r'\n?<details type="cache-diagnostics">.*?</details>\n?', flags=re.DOTALL
+)
 PATTERN_ANY_DETAILS = re.compile(r"\n?<details[^>]*>.*?</details>\n?", flags=re.DOTALL)
 PATTERN_INLINE_METADATA_MARKER = re.compile(r"[ ]?\[\]\(anthropic:[^)]*\)[ ]?")
 # Removing a marker or carrier leaves the line it sat on whitespace-only, which
@@ -629,6 +650,24 @@ class PipeRenderStrategy:
 # END GENERATED SECTION: anthropic_pipe.response.state
 
 
+# OpenWebUI writes every `replace` and `message` event into the database, and
+# each write rewrites the whole chat row (full history JSON). Re-rendering a
+# block on every thinking / tool-input / compaction delta therefore wrote a long
+# chat hundreds of times per turn (#59). Progress re-renders go out as
+# `chat:message` and text deltas as `chat:message:delta` instead -- same UI
+# effect, never persisted -- and the persisted `replace` follows at most once
+# per interval and at every block end.
+REPLACE_PERSIST_INTERVAL = 5.0
+# Events that write the message content or end it. With output items OpenWebUI
+# builds the content and signals completion itself; these would overwrite it.
+CONTENT_EVENT_TYPES = ("message", "replace", "chat:message", "chat:message:delta", "chat:completion")
+# OpenWebUI's frontend only appends deltas: a page reloaded mid-stream starts
+# from the stored copy, a reconnected socket keeps its local copy, and both miss
+# the deltas in between. Every UI_RESYNC_INTERVAL a delta goes out as the full
+# content (`chat:message`) instead, so such a client is whole again within it.
+UI_RESYNC_INTERVAL = 2.0
+
+
 @dataclass
 class PipeRequestContext:
     """Request-scoped helpers and stream state — the single object handlers receive.
@@ -661,14 +700,51 @@ class PipeRequestContext:
     api_tool_names: List[str] = field(default_factory=list)
     api_key: str = ""
 
+    # Persistence throttle for progress re-renders (see REPLACE_PERSIST_INTERVAL)
+    # and the last full-content UI event (see UI_RESYNC_INTERVAL).
+    persisted_at: float = 0.0
+    persist_pending: bool = False
+    shown_at: float = 0.0
+
+    # Output items of this call (ItemStream) when the pipe streams them to
+    # OpenWebUI >= 0.12.2. Then content no longer goes out as text events: the
+    # accumulated text is only kept for the non-UI consumers of text().
+    items: Any = None
+
     async def emit_event(self, event: dict) -> None:
         """Forward an event to the pipe's event emitter."""
+        if self.items is not None and event.get("type") in CONTENT_EVENT_TYPES:
+            return
         await self.pipe.emit_event(event, self.event_emitter)
 
+    async def note(self, text: str) -> None:
+        """Pipe-authored text that belongs to the answer (limits, errors, the metadata marker)."""
+        if self.items is not None:
+            self.items.note(text)
+            self.final_message.append(text)
+            return
+        await self.emit_delta(text)
+
     async def emit_delta(self, content: str) -> None:
-        """Emit a streaming content delta and append it to the accumulated message."""
-        await self.emit_event({"type": "message", "data": {"content": content}})
+        """Emit a streaming content delta and append it to the accumulated message.
+
+        Shown as an unpersisted ``chat:message:delta``, or as the full content
+        once UI_RESYNC_INTERVAL has passed; the stored copy catches up through a
+        ``replace`` once REPLACE_PERSIST_INTERVAL has passed and at every block end.
+        """
         self.final_message.append(content)
+        if self.items is not None:
+            return
+        now = time.monotonic()
+        if now - self.persisted_at >= REPLACE_PERSIST_INTERVAL:
+            await self.emit_replace(self.text())
+            return
+        if now - self.shown_at >= UI_RESYNC_INTERVAL:
+            await self.emit_event({"type": "chat:message", "data": {"content": self.text()}})
+            self.shown_at = now
+        else:
+            await self.emit_event({"type": "chat:message:delta", "data": {"content": content}})
+        self.persist_pending = True
 
     async def emit_block(self, block: str) -> None:
         """Emit a rendered block, guaranteeing it starts on its own line.
@@ -688,13 +764,36 @@ class PipeRequestContext:
             block = "\n" + block
         await self.emit_delta(block)
 
-    async def emit_replace(self, content: str) -> None:
-        """Emit a full-content replace event and reset the accumulated message to it."""
-        await self.emit_event({"type": "replace", "data": {"content": content}})
+    async def emit_replace(self, content: str, *, progress: bool = False) -> None:
+        """Emit a full-content replace event and reset the accumulated message to it.
+
+        ``progress=True`` marks an intermediate re-render (one per stream delta):
+        it reaches the UI as an unpersisted ``chat:message`` unless the last
+        stored ``replace`` is older than REPLACE_PERSIST_INTERVAL.
+        """
+        if self.items is not None:
+            self.final_message[:] = [content]
+            return
+        now = time.monotonic()
+        if progress and now - self.persisted_at < REPLACE_PERSIST_INTERVAL:
+            await self.emit_event({"type": "chat:message", "data": {"content": content}})
+            self.persist_pending = True
+        else:
+            await self.emit_event({"type": "replace", "data": {"content": content}})
+            self.persisted_at = now
+            self.persist_pending = False
+        self.shown_at = now
         self.final_message.clear()
         self.final_message.append(content)
 
-    async def update_content_block(self, old_block: str, new_block: str) -> None:
+    async def flush_replace(self) -> None:
+        """Store the current content if a progress re-render was only shown, not stored."""
+        if self.persist_pending and self.items is None:
+            await self.emit_replace(self.text())
+
+    async def update_content_block(
+        self, old_block: str, new_block: str, *, progress: bool = False
+    ) -> None:
         """Replace old_block in accumulated content with new_block, preserving surrounding text."""
         if not old_block and not new_block:
             # Slim (sub-agent) output formats every collapsible to "". Without
@@ -706,11 +805,11 @@ class PipeRequestContext:
             idx = text.find(old_block)
             if idx != -1:
                 text = text[:idx] + new_block + text[idx + len(old_block):]
-                await self.emit_replace(text)
+                await self.emit_replace(text, progress=progress)
                 return
         # First emit or old block not found — append and replace with full text
         text = self.pipe._append_block_to_text(self.text(), new_block)
-        await self.emit_replace(text)
+        await self.emit_replace(text, progress=progress)
 
     def text(self) -> str:
         """Return the accumulated message content as a single string."""
@@ -762,6 +861,12 @@ class PipeRequestContext:
 # BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
 # END GENERATED SECTION: anthropic_pipe.shared.pricing
 
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.output_items
+# END GENERATED SECTION: anthropic_pipe.shared.output_items
+
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.threads
+# END GENERATED SECTION: anthropic_pipe.shared.threads
+
 
 
 
@@ -792,6 +897,8 @@ class Pipe:
         "claude-mythos-5": 128000,
         "claude-fable-5-1": 128000,
         "claude-mythos-5-1": 128000,
+        "claude-fable-5-2": 128000,
+        "claude-mythos-5-2": 128000,
         "claude-haiku-5-5": 128000,
         "claude-haiku-4-5": 64000,
     }
@@ -813,6 +920,8 @@ class Pipe:
         "claude-mythos-5": 1000000,
         "claude-fable-5-1": 1000000,
         "claude-mythos-5-1": 1000000,
+        "claude-fable-5-2": 1000000,
+        "claude-mythos-5-2": 1000000,
         "claude-opus-4-8": 1000000,
         "claude-opus-4-7": 1000000,
         "claude-opus-4-6": 1000000,
@@ -832,6 +941,43 @@ class Pipe:
     # `thinking:{"type":"adaptive"}` -- which the API rejects. Pinning it per identity makes those endpoints
     # behave like the direct one.
     MODEL_CAPABILITY_OVERRIDES = {
+        # Fable 5.2 / Mythos 5.2 (2026-11-09): adaptive thinking always on,
+        # no forced tool_choice, all five effort levels, fast mode GA (no beta
+        # header). Mythos mirrors Fable (see the parity note below).
+        "claude-fable-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+            # Per-message effort and Task Budgets: both listed for the 5.2
+            # models in the live docs (2026-11-14), still beta headers.
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
+        },
+        "claude-mythos-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+            # Per-message effort and Task Budgets: both listed for the 5.2
+            # models in the live docs (2026-11-14), still beta headers.
+            "supports_mid_conversation_effort": True,
+            "supports_task_budget": True,
+        },
         # Fable 5.1 / Mythos 5.1 reject tool_choice "tool" and "any" with a 400
         # (auto/none unchanged). /v1/models does not report that, so it is
         # pinned by identity; Mythos mirrors Fable (see the parity note below).
@@ -963,8 +1109,8 @@ class Pipe:
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
-            "supports_fast_mode": True,
-            "fast_mode_beta": True,
+            # Fast mode deprecated 2026-10-30, removed 2026-11-30: speed:"fast"
+            # then returns an error. Not offered any more; use Opus 5.5.
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -974,7 +1120,7 @@ class Pipe:
             "supports_dynamic_filtering": True,
             # Fast mode removed for Opus 4.7 (2026-07-24): speed:"fast" now
             # returns an error instead of falling back to standard speed.
-            # Use Opus 5 or Opus 4.8 for fast mode.
+            # Use Opus 5.5 or Opus 5 for fast mode.
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -1036,9 +1182,21 @@ class Pipe:
             description="AWS 'Claude on AWS' workspace id. When set, sent as the 'anthropic-workspace-id' "
             "header on every request. Required when ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
         )
+        LEGACY_CHAT_MIGRATION: Literal["off", "dry-run", "on"] = Field(
+            default="dry-run",
+            description="One-time upgrade of chats written before pipe 0.11 to OpenWebUI output items. "
+            "dry-run: count what would change, on: convert, off: skip. Each runs once; the report "
+            "(anthropic_pipe_legacy_migration_*.json in OpenWebUI's data dir) is the marker, delete it to "
+            "run again. A turn is converted when the model gets the same messages afterwards; turns that "
+            "carried the cache-diagnostics block or adjacent text blocks miss the prompt cache once.",
+        )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode (Fable 5.2, Opus 5.5 / 5). Up to 2.5x faster output at higher costs",
+        )
+        ENABLE_MESSAGE_THREADS: bool = Field(
+            default=False,
+            description="Message threads (beta): inside a tool loop, send only the new tool results instead of the whole conversation on every request. Smaller requests and a faster first token in long tool loops. Anthropic keeps the conversation in memory for up to 1 hour (not eligible for zero data retention). Not used together with compaction; falls back to full requests on any thread error.",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
@@ -1081,6 +1239,7 @@ class Pipe:
             default=3,
             ge=0,
             le=50,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of retries for failed requests (due to rate limiting, transient errors or connection issues)",
         )
         CACHE_CONTROL: Literal[
@@ -1221,7 +1380,9 @@ class Pipe:
             default=8192,
             ge=1024,
             le=64000,
-            description="Thinking budget tokens",
+            # Slider on OpenWebUI >= 0.12.5; older versions show a number box.
+            json_schema_extra={"input": {"type": "range", "step": 1024}},
+            description="Thinking budget tokens. Only used by models without adaptive thinking (Haiku 4.5, Sonnet 4.5, Opus 4.5); newer models follow EFFORT.",
         )
         THINKING_DISPLAY: Literal["summarized", "omitted", "updates"] = Field(
             default="omitted",
@@ -1308,12 +1469,14 @@ class Pipe:
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web searches",
         )
         WEB_FETCH_MAX_USES: int = Field(
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web fetch requests per conversation turn",
         )
         WEB_SEARCH_USER_CITY: str = Field(
@@ -1365,14 +1528,20 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
+        ADVISOR_MODEL: Literal[
+            "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
+            "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+            "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1",
+            "claude-fable-5-2", "claude-mythos-5-2",
+        ] = Field(
             default="claude-opus-5",
-            description="Advisor model ID.",
+            description="Advisor model ID. The advisor must be at least as capable as the chat model; an invalid pair falls back to the strongest valid advisor. Fable 5.2 can advise every model.",
         )
         ADVISOR_MAX_USES: int = Field(
             default=0,
             ge=0,
             le=100,
+            json_schema_extra={"input": {"type": "range"}},
             description="Max advisor calls per request (0 = unlimited).",
         )
         ADVISOR_CACHING: Literal["off", "5m", "1h"] = Field(
