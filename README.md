@@ -2,6 +2,9 @@
 
 > Near-complete Anthropic Messages API parity for OpenWebUI — model auto-discovery, native streaming, citations, web search/fetch, code execution, Files API, Agent Skills, prompt caching, context editing, compaction, and programmatic tool calling.
 
+> [!NOTE]
+> Some of the work done in this repository was done using AI.
+
 ---
 
 ## 📌 Current status
@@ -13,6 +16,7 @@
 - **Anthropic API version:** `2026-10-21`
 - **Model list and capabilities are fetched dynamically** from Anthropic's Models API (`max_input_tokens`, `max_tokens`, thinking/effort support, compaction support, etc.)
 - **Current Anthropic model docs focus on:** `Claude Fable 5.1`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, `Claude Haiku 5.5`
+- **OpenWebUI's own tool calls no longer 400:** chats with Open Terminal or skills enabled used to fail with `unexpected tool_use_id found in tool_result blocks`, because OpenWebUI's hidden tool calls (terminal skill manifest, memory recall, attached knowledge) reach the pipe as OpenAI-style `tool_calls` plus `role: tool` answers. They are now converted to `tool_use` blocks, and a final pairing check keeps one broken history entry from making a chat unusable **(added in this fork)**
 
 This pipe targets the **Anthropic Messages API** directly through the official **Anthropic Python SDK** and keeps the OpenWebUI experience close to Anthropic-native behavior while still playing nicely with OpenWebUI models, tools, filters, files, notes, channels, and task generation.
 
@@ -24,7 +28,7 @@ This pipe targets the **Anthropic Messages API** directly through the official *
 |------|---------------|
 | **Models & capabilities** | Auto-discovered Claude models, capability parsing from Anthropic's Models API, no hardcoded model tables to babysit |
 | **Streaming UX** | SDK-based streaming, grouped reasoning/tool/code blocks, rich tool result rendering via OpenWebUI's `process_tool_result()` |
-| **Reasoning controls** | Extended thinking, adaptive thinking where supported, interleaved thinking, `thinking.display="omitted"`, effort levels including `xhigh` |
+| **Reasoning controls** | Extended thinking, adaptive thinking where supported, interleaved thinking, `thinking.display="omitted"`, effort levels including `xhigh`, plus per-message effort that preserves the prompt cache and Task Budgets **(added in this fork)** |
 | **Web tooling** | Native `web_search` + `web_fetch`, citations, location-aware searches, optional dynamic filtering on supported models |
 | **Execution** | Anthropic code execution, persistent container reuse across turns, unified code/tool/output display, programmatic tool calling |
 | **Files** | Native PDF upload, Anthropic Files API upload/download, file persistence markers, code-exec file roundtrips |
@@ -150,8 +154,8 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `ENABLE_THINKING` | `false` | Enables extended thinking. On models with thinking on by default turning it **off** sends their lowest setting: `disabled` on Opus 5 / Sonnet 5 / Haiku 5.5, `between_tools` on Sonnet 5.5, effort `low` on Opus 5.5 (thinking cannot be turned off there) |
 | `THINKING_BUDGET_TOKENS` | `8192` | Manual thinking budget for models that still use `budget_tokens` |
 | `THINKING_DISPLAY` | `omitted` | `summarized` streams summarized thinking, `omitted` hides it for faster time-to-first-text, `updates` (beta) hides reasoning but shows the short progress updates Fable 5 / 5.1, Opus 5.5 and Sonnet 5.5 write before a tool call |
-| `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`). On models that support per-message effort (Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1) this valve is the cache-preserving baseline; a `reasoning_effort` deviation from it goes out as a mid-conversation message instead of a top-level change |
-| `TASK_BUDGET_TOKENS` | `0` | Advisory token ceiling (beta Task Budgets) for the whole tool loop, including all tool calls. `0` disables it; non-zero values below `20000` are raised to it. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1 — ignored elsewhere. Pick a value you've measured for the task: too tight makes the model cut corners |
+| `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`). On models that support per-message effort (Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1) this valve is the cache-preserving baseline; a `reasoning_effort` deviation from it goes out as a mid-conversation message instead of a top-level change **(added in this fork)** |
+| `TASK_BUDGET_TOKENS` | `0` | Advisory token ceiling (beta Task Budgets) for the whole tool loop, including all tool calls. `0` disables it; non-zero values below `20000` are raised to it. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1 — ignored elsewhere. Pick a value you've measured for the task: too tight makes the model cut corners **(added in this fork)** |
 | `HIDE_BLOCKS` | `[]` | Multiselect: block types to hide from the chat display while still replaying them to the API — `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
 | `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` (adds cache read/write tokens and call count) |
 | `TOOL_RESULT_MAX_TOKENS` | `50000` | Backstop truncation for oversized text tool results (`0` disables). Image blocks are exempt |
@@ -237,13 +241,13 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
-### `v0.10.5`
+### `v0.10.5` **(added in this fork)**
 - Fixed a 400 ("unexpected tool_use_id found in tool_result blocks") on chats with Open Terminal or skills enabled. OpenWebUI hands the pipe its own hidden tool calls (terminal skill manifest, memory recall, attached knowledge) as an assistant message with OpenAI-style `tool_calls` plus `role: tool` answers; the pipe dropped the assistant half as empty and sent the answers as orphaned `tool_result` blocks. `tool_calls` now become `tool_use` blocks, and the same applies to tool turns an earlier model ran in the same chat. A final pairing check keeps one broken history entry from making a chat unusable: an orphaned result is kept as text, an unanswered call is dropped, and valid histories pass through unchanged so the prompt cache is unaffected.
 
-### `v0.10.4`
+### `v0.10.4` **(added in this fork)**
 - Task Budgets no longer send `remaining`. v0.10.3 lowered it on every tool loop request after the first; this pipe resends the full history each time, so that under-reported the budget (the model wrapped up earlier than the budget allowed) and the changing value invalidated the prompt-cache prefix. `task_budget` now goes out unchanged (`{type, total}`) and the server keeps the countdown, as Anthropic recommends for loops that resend full history
 
-### `v0.10.3`
+### `v0.10.3` **(added in this fork)**
 - Per-message effort (OpenWebUI's `reasoning_effort`, or an `EFFORT` valve change) no longer invalidates the prompt cache on models that support it (beta `mid-conversation-output-config-2026-07-01`: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Mythos 5.1). The top-level `output_config.effort` stays pinned to the user's `EFFORT` valve; a deviation goes out as an effort-only mid-conversation message instead, so only requests with history to protect and adaptive thinking active use it
 - Task Budgets (beta `task-budgets-2026-03-13`): new `TASK_BUDGET_TOKENS` valve (`0` = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard `max_tokens` cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1, Mythos 5/5.1. Since this pipe resends full history on every tool-loop request rather than holding one stream open, the orchestrator tracks cumulative output tokens itself and sends `remaining` from the second iteration on
 
