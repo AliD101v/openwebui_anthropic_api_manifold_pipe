@@ -1,6 +1,6 @@
 ---
 name: sync-upstream
-description: Bring this fork and its working branch up to date with Podden's upstream - fetch, analyse what upstream already ships, merge, resolve conflicts, rebuild the artifacts, re-release fork-only work as the next patch version, run the checks and fast-forward main. Use when asked to sync, update or merge upstream / Podden, or to check what upstream has shipped.
+description: Bring this fork and its working branch up to date with Podden's upstream - fetch, analyse what upstream already ships, merge everything (the pipe, the toggle filters, the companion filter, helpers, docs), resolve conflicts, rebuild the artifacts, re-release fork-only work as the next patch version, run the checks, fast-forward main and report including the toggle changes. Use when asked to sync, update or merge upstream / Podden, or to check what upstream has shipped.
 argument-hint: "[dry-run]"
 ---
 
@@ -10,7 +10,9 @@ This repo is a fork of `Podden/openwebui_anthropic_api_manifold_pipe`. Upstream 
 
 Remotes: `upstream` (Podden, merge source), `origin` (the GitHub fork), `forgejo` (a mirror). `main` mirrors the working branch; GitHub's "N commits behind Podden" badge counts `origin/main`, not the feature branch.
 
-With the argument `dry-run`: do steps 1-2 only, report what a merge would involve, change nothing.
+**Always sync everything**, not only the pipe: the toggle filters (`anthropic_pipe_*_toggle.py`), the companion filter (`anthropic_manifold_companion_filter.py`), `helpers/`, `AGENTS.md`, `README.md` and any file upstream adds. The final report always covers the toggles (step 10), even when they did not change.
+
+With the argument `dry-run`: do steps 1-2 only (including the toggle/filter listing), report what a merge would involve, change nothing.
 
 ## Hard rules
 
@@ -30,7 +32,11 @@ for b in HEAD main origin/main; do printf "%s: " $b; git rev-list --left-right -
 git log --oneline HEAD..upstream/main
 MB=$(git merge-base HEAD upstream/main)
 comm -12 <(git diff --name-only $MB upstream/main | sort) <(git diff --name-only $MB HEAD | sort)   # changed on both sides
+git diff --stat $MB upstream/main -- 'anthropic_pipe_*toggle.py' anthropic_manifold_companion_filter.py   # toggles + companion filter
+git ls-tree --name-only upstream/main | grep -E 'toggle|filter'   # catches filters upstream added since last sync
 ```
+
+Note `$MB` for the report: it is the "previous sync point" the toggle comparison in step 10 is measured from.
 
 Nothing new upstream and `main` equal to the branch means there is nothing to do: say so and stop. Pending uncommitted work in the tree: commit it as its own commit first (ask if it is not obviously the user's README/provenance edits).
 
@@ -64,6 +70,18 @@ Resolve by hand only in `src/anthropic_pipe/**` and `README.md`. Typical conflic
 | `anthropic_pipe.py`, `anthropic_pipe.min.py` | Do not resolve. Rebuild (below). |
 
 After the sources are clean: `python3 helpers/build_anthropic_pipe.py`.
+
+### 3a. Toggles, companion filter and everything else
+
+These are standalone files users install separately in OpenWebUI. The build does not touch them, so they come through the merge as ordinary files and conflicts are hand-resolved (upstream's side unless the fork edited the same lines on purpose).
+
+For each file in `anthropic_pipe_*_toggle.py` and `anthropic_manifold_companion_filter.py`, plus any filter added upstream:
+
+- Read the upstream diff (`git diff $MB upstream/main -- <file>`), not just the stat. Separate **metadata** changes (description, `version:`) from **code** changes (what the filter writes into `__metadata__`, which models or valves it reads).
+- Check that the filter still matches the pipe: the keys a toggle sets (e.g. `anthropic_fast`) must be what `src/anthropic_pipe/request/payload.py` reads, and any model names a filter hard-codes must agree with the capability table in `pipe_template.py`. A pipe change that renames a metadata key or valve needs the filter changed in the same sync.
+- Compare the post-merge file to upstream: `git diff upstream/main HEAD -- <file>`. Empty means no fork edits; otherwise list them in the report.
+- Record each file's `version:` line before and after (`grep -n '^version:' <files>`).
+- Also look over the remaining changed files (`helpers/`, `AGENTS.md`, `.gitignore`, `LICENSE`) for anything that changes how the sync itself works, e.g. a new helper test to run in step 6 or a changed build command.
 
 ### 4. Version and changelog
 
@@ -115,4 +133,8 @@ Offer: plain `git push` of the branch and `main` to `origin` and `forgejo` (neve
 
 ### 10. Report
 
-Short: what upstream shipped, what the fork kept / dropped / extended, the version it is now, test results (with the upstream-baseline failures called out), and what is not verified (live API, live OpenWebUI). End with the push question.
+Short: what upstream shipped, what the fork kept / dropped / extended, the version it is now, test results (with the upstream-baseline failures called out), and what is not verified (live API, live OpenWebUI).
+
+**Always include a "Toggles and filters" section**, every time, one line per file (thinking, web search, code execution, files, fast, companion filter, and any new filter): `unchanged`, or what changed upstream (metadata only vs code, with the version before -> after), and whether the fork edits it. When a filter's description or code changed, add one line telling the user to re-import that file in OpenWebUI, because installed copies do not update from the repo. If a filter had to change because of a pipe change, say which.
+
+End with the push question.
