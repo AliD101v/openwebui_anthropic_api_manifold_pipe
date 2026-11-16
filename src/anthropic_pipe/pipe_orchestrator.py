@@ -331,8 +331,14 @@ class PipeOrchestratorMethods:
             request_ctx.api_tool_names = api_tool_names
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
+            # Usage is tallied whenever something will show it: the token gauge,
+            # the cost estimate, or an OpenWebUI request that asked for usage.
+            # SHOW_COST must count here. Gating on the token display alone left
+            # it dead by itself (default SHOW_TOKEN_COUNT is Off): nothing was
+            # tallied, so no cost reached the status line or the usage tooltip.
             include_usage = (
                 __user__["valves"].SHOW_TOKEN_COUNT != "Off"
+                or getattr(__user__["valves"], "SHOW_COST", True)
                 or body.get("stream_options", {}).get("include_usage", False)
             )
             total_usage: Optional[dict[str, int]] = None
@@ -1491,8 +1497,8 @@ class PipeOrchestratorMethods:
 
         # ============ Token Count Display ============
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
-        # Without the token display there is nothing to say: no final line, as
-        # with OpenWebUI's own connections.
+        # Without the token display or a cost there is nothing to say: no final
+        # line, as with OpenWebUI's own connections (see `shows_cost` below).
         shows_usage = bool(include_usage and show_token_setting != "Off" and total_usage and not is_internal)
         if shows_usage:
             def format_num(n: int) -> str:
@@ -1546,10 +1552,14 @@ class PipeOrchestratorMethods:
                 if billed_input:
                     final_status += f" | ⚡ {cache_read / billed_input * 100:.0f}% cached"
 
-            # Estimated list-price cost of the whole turn (all calls). Silently
-            # absent for models with no known rate card rather than showing $0.
-            if "cost_usd" in total_usage:
-                final_status += f" | 💵 ≈{ModelPricing.format_usd(total_usage['cost_usd'])}"
+        # Estimated list-price cost of the whole turn (all calls). Silently
+        # absent for models with no known rate card rather than showing $0.
+        # Independent of SHOW_TOKEN_COUNT: with the token display Off the line
+        # is just "✅ Response Complete | 💵 ≈$x". Never on task or sub-agent
+        # runs, which have no status line of their own.
+        shows_cost = bool(total_usage and "cost_usd" in total_usage and not is_internal)
+        if shows_cost:
+            final_status += f" | 💵 ≈{ModelPricing.format_usd(total_usage['cost_usd'])}"
 
         # Consolidate: emit a final replace with the complete message so OpenWebUI
         # has the authoritative content (replaces any partial delta/replace state).
@@ -1690,7 +1700,7 @@ class PipeOrchestratorMethods:
                 {"type": "replace", "data": {"content": consolidated}}
             )
 
-        if shows_usage:
+        if shows_usage or shows_cost:
             await status.complete(final_status)
         else:
             # OpenWebUI stores every status event before the emitter returns.

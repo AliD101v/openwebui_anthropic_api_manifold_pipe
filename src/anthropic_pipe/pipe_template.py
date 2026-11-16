@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.2
+version: 0.11.3
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
@@ -40,6 +40,10 @@ Supports:
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.3
+- SHOW_COST showed nothing on its own. The pipe only tallied usage when SHOW_TOKEN_COUNT was On or the model had OpenWebUI's Usage capability, so with the default SHOW_TOKEN_COUNT `Off` no cost reached the message info tooltip or the status line, whatever SHOW_COST said. Usage is now tallied whenever SHOW_COST is on (the default), so `cost_usd` and `cost_breakdown_usd` always reach the usage tooltip and the analytics page.
+- The estimated cost also shows in the status line without the token display: `✅ Response Complete | 💵 ≈$0.0123`. With SHOW_TOKEN_COUNT `On` or `With Cache` it is appended to the gauge as before. Models without a known price show no cost; SHOW_COST off restores the previous behaviour (no final line while the token display is Off).
+
 v0.11.2
 - Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1 / 5.2, Mythos 5.1 / 5.2). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
 - Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1/5.2, Mythos 5/5.1/5.2. `task_budget` goes out unchanged ({type, total}) on every request and the server keeps the countdown: this pipe resends the full history on each tool-loop request, and a lowered `remaining` would under-report the budget and invalidate the prompt-cache prefix.
@@ -1460,8 +1464,8 @@ class Pipe:
             default=True,
             description="Report the estimated USD cost of the turn as `cost_usd` plus a per-component "
             "`cost_breakdown_usd` (input, output, cache writes/reads, web search) in the message usage "
-            "(visible in the message info tooltip and persisted for analytics) and, when SHOW_TOKEN_COUNT "
-            "is on, in the status line. Based on Anthropic list prices for the model, including cache "
+            "(visible in the message info tooltip and persisted for analytics) and in the status line "
+            "(`💵 ≈$…`, also when SHOW_TOKEN_COUNT is Off). Based on Anthropic list prices for the model, including cache "
             "writes/reads, fast mode, US data residency and web searches; negotiated or third-party-proxy "
             "rates are not known to the pipe unless the admin sets MODEL_PRICING_OVERRIDES.",
         )

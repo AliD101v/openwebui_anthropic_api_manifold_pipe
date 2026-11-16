@@ -9,7 +9,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.11.2`
+- **Current pipe version:** `0.11.3`
 - **Recommended OpenWebUI:** `0.12.2+` (answers stream as native output items; older versions from `0.9.0+` keep the text path)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.7`, `pillow-heif>=0.18.0`
@@ -17,6 +17,7 @@
 - **Model list and capabilities are fetched dynamically** from Anthropic's Models API (`max_input_tokens`, `max_tokens`, thinking/effort support, compaction support, etc.)
 - **Current Anthropic model docs focus on:** `Claude Fable 5.2`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, `Claude Haiku 5.5`
 - **A broken tool history no longer makes a chat unusable:** a tool call stored without its output (or an output without its call) used to make the API reject every later message in that chat with a 400 until the history was edited by hand. A final pairing check keeps an orphaned result as text and drops an unanswered call; valid histories pass through unchanged, so the prompt cache is unaffected **(added in this fork)**
+- **The cost estimate shows in the status line and the usage tooltip by default:** `SHOW_COST` did nothing while `SHOW_TOKEN_COUNT` was `Off` (the default), because the pipe only tallied usage for the token display. It now tallies whenever `SHOW_COST` is on, and the status line reads `✅ Response Complete | 💵 ≈$0.0123` even without the token gauge **(added in this fork)**
 
 This pipe targets the **Anthropic Messages API** directly through the official **Anthropic Python SDK** and keeps the OpenWebUI experience close to Anthropic-native behavior while still playing nicely with OpenWebUI models, tools, filters, files, notes, channels, and task generation.
 
@@ -135,6 +136,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `ENABLE_TEXT_EDITOR_TOOL` | `false` | Experimental: Claude's native `text_editor_20250728` (`str_replace_based_edit_tool`), bridged to `write_file` + `replace_file_content` (+ `run_command` fallback for `view`/`insert`). Only activates when both callables are present |
 | `TEXT_EDITOR_MAX_CHARACTERS` | `10000` | Anthropic-side truncation limit for text_editor `view` results |
 | `DATA_RESIDENCY` | `global` | Anthropic `inference_geo` routing: `global` or `us` (`us` costs 1.1x tokens) |
+| `MODEL_PRICING_OVERRIDES` | `""` | JSON patch for the built-in price table behind `SHOW_COST`, USD per million tokens, e.g. `{"claude-opus-5-5": {"input": 3.0, "output": 15.0}}`. Cache rates follow from `input` unless given |
 | `REQUEST_TIMEOUT` | `300` | Anthropic API timeout in seconds |
 | `TOOL_CALL_TIMEOUT` | `30` | Per-tool execution timeout in seconds |
 | `ENABLE_CACHE_DIAGNOSTICS` | `false` | Logs cache-prefix diffs between turns. Debugging only |
@@ -163,6 +165,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `TASK_BUDGET_TOKENS` | `0` | Advisory token ceiling (beta Task Budgets) for the whole tool loop, including all tool calls. `0` disables it; non-zero values below `20000` are raised to it. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1/5.2, Mythos 5/5.1/5.2 — ignored elsewhere. Pick a value you've measured for the task: too tight makes the model cut corners **(added in this fork)** |
 | `HIDE_BLOCKS` | `[]` | Multiselect: block types to hide from the chat display while still replaying them to the API — `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
 | `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` (adds cache read/write tokens and call count) |
+| `SHOW_COST` | `True` | Estimated USD cost of the turn: `💵 ≈$…` in the status line (also with `SHOW_TOKEN_COUNT` `Off`) plus `cost_usd` and a per-component `cost_breakdown_usd` in the message usage tooltip and the analytics page. Computed from Anthropic's list prices (cache writes by TTL, cache reads, fast mode, Haiku 5.5's long-prompt tier, US data residency, web searches); models without a known price show nothing **(added in this fork)** |
 | `TOOL_RESULT_MAX_TOKENS` | `50000` | Backstop truncation for oversized text tool results (`0` disables). Image blocks are exempt |
 
 #### Search, files, and skills
@@ -246,6 +249,10 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.11.3` **(added in this fork)**
+- `SHOW_COST` showed nothing on its own. The pipe only tallied usage when `SHOW_TOKEN_COUNT` was `On` or the model had OpenWebUI's Usage capability, so with the default `SHOW_TOKEN_COUNT` `Off` no cost reached the message info tooltip or the status line, whatever `SHOW_COST` said. Usage is now tallied whenever `SHOW_COST` is on (the default), so `cost_usd` and `cost_breakdown_usd` always reach the usage tooltip and the analytics page
+- The estimated cost also shows in the status line without the token display: `✅ Response Complete | 💵 ≈$0.0123`. With `SHOW_TOKEN_COUNT` `On` or `With Cache` it is appended to the gauge as before. Models without a known price show no cost; `SHOW_COST` off restores the previous behaviour (no final line while the token display is `Off`)
+
 ### `v0.11.2` **(added in this fork)**
 - Per-message effort (OpenWebUI's `reasoning_effort`, or an `EFFORT` valve change) no longer invalidates the prompt cache on models that support it (beta `mid-conversation-output-config-2026-07-01`: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1 / 5.2, Mythos 5.1 / 5.2). The top-level `output_config.effort` stays pinned to the user's `EFFORT` valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it
 - Task Budgets (beta `task-budgets-2026-03-13`): new `TASK_BUDGET_TOKENS` valve (`0` = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard `max_tokens` cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1/5.2, Mythos 5/5.1/5.2. `task_budget` goes out unchanged (`{type, total}`) on every request and the server keeps the countdown: this pipe resends the full history on each tool-loop request, and a lowered `remaining` would under-report the budget and invalidate the prompt-cache prefix
