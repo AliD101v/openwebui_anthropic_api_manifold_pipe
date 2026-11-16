@@ -44,6 +44,11 @@ def _load_module():
     status_module = importlib.util.module_from_spec(status_spec)
     status_spec.loader.exec_module(status_module)
     module.StatusEmitter = status_module.StatusEmitter
+    # Module-level helpers the compiled artifact defines in the template (0.11.2:
+    # the model's Builtin Tools switches, OpenWebUI tools replaced by Anthropic's).
+    # This test passes no model metadata and no tools, so the plain answers hold.
+    module.owui_builtin_allowed = lambda metadata, category: True
+    module.drop_replaced_owui_tools = lambda tools: tools
     return module
 
 
@@ -55,6 +60,7 @@ class FakeValves:
         self.ENABLE_PROGRAMMATIC_TOOL_CALLING = False
         self.ENABLE_INTERLEAVED_THINKING = False
         self.WEB_FETCH = False
+        self.CODE_EXECUTION = True
         self.ANTHROPIC_API_KEY = "sk-admin-key"
         self.REFUSAL_FALLBACK = "off"
         self.ENABLE_CACHE_DIAGNOSTICS = False
