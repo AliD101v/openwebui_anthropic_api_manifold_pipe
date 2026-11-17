@@ -9,7 +9,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.11.4`
+- **Current pipe version:** `0.11.5`
 - **Recommended OpenWebUI:** `0.12.2+` (answers stream as native output items; older versions from `0.9.0+` keep the text path)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.7`, `pillow-heif>=0.18.0`
@@ -288,6 +288,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.11.5` **(added in this fork)**
+- LEGACY_CHAT_MIGRATION now converts chats written by pipe < 0.11 on OpenWebUI 0.13. Those turns carry a hidden call (the skill list) in front of the old text, which the migration took for "already output items", so it skipped every one of them and they kept relying on the `<details>` parser. The hidden call now stays in front of the converted items, and a turn still converts only if the model is sent the same messages afterwards (checked on two real chats: 7 of 7 legacy turns convert, the whole request is identical before and after). A dry run or migration that already ran is final until its report is deleted: remove `anthropic_pipe_legacy_migration_*.json` in OpenWebUI's data directory to run it again.
+
 ### `v0.11.4` **(added in this fork)**
 - Chats written before 0.11 no longer replay their old turns as raw HTML on OpenWebUI 0.13. 0.13 records a hidden call (the skill list) at the start of every turn, so such a turn comes back as that call, its result and then the old `<details>` text. The pipe took that text into the turn's replay and sent it as it was: thinking signatures, server tool base64 carriers and collapsible HTML as plain prose, several times the tokens of the real conversation (one 13-message chat sent 206,645 characters instead of 22,623). It goes through the old parser again, as before 0.11, so thinking, web search and tool calls replay as API blocks. Likely cause of `Request declined by Claude (reasoning extraction policy)` on those chats, which Sonnet 5.5 hit and Opus 5.5 hit sometimes. Chats written by 0.11 or newer were not affected.
 

@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.4
+version: 0.11.5
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
@@ -40,6 +40,9 @@ Supports:
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.5
+- LEGACY_CHAT_MIGRATION now converts chats written by pipe < 0.11 on OpenWebUI 0.13. Those turns carry a hidden call (the skill list) in front of the old text, which the migration took for "already output items", so it skipped every one of them and they kept relying on the `<details>` parser. The hidden call now stays in front of the converted items, and a turn still converts only if the model is sent the same messages afterwards (checked on two real chats: 7 of 7 legacy turns convert, the whole request is identical before and after). A dry run or migration that already ran is final until its report is deleted: remove `anthropic_pipe_legacy_migration_*.json` in OpenWebUI's data directory to run it again.
+
 v0.11.4
 - Chats written before 0.11 no longer replay their old turns as raw HTML on OpenWebUI 0.13. 0.13 records a hidden call (the skill list) at the start of every turn, so such a turn comes back as that call, its result and then the old `<details>` text. The pipe took that text into the turn's replay and sent it as it was: thinking signatures, server tool base64 carriers and collapsible HTML as plain prose, several times the tokens of the real conversation (one 13-message chat sent 206,645 characters instead of 22,623). It goes through the old parser again, as before 0.11, so thinking, web search and tool calls replay as API blocks. Likely cause of `Request declined by Claude (reasoning extraction policy)` on those chats, which Sonnet 5.5 hit and Opus 5.5 hit sometimes. Chats written by 0.11 or newer were not affected.
 
@@ -7038,8 +7041,30 @@ class Pipe:
             out.append([b for b in blocks if b.get("type") != "text" or b["text"].strip()])
         return out
 
+    @staticmethod
+    def _hidden_prelude(output: list) -> tuple[list, list]:
+        """Split a stored output into (prelude, rest), order preserved.
+
+        The prelude is what OpenWebUI 0.13 stores in front of every turn: the
+        hidden calls (skill list, memory recall) with their results. It replays
+        as a tool pair, never as legacy text, so the migration must carry it.
+        """
+        hidden = [i for i in output if isinstance(i, dict) and i.get("type") == "function_call" and i.get("hidden") is True]
+        hidden_ids = {id(i) for i in hidden}
+        call_ids = {i.get("call_id") for i in hidden if i.get("call_id") is not None}
+        prelude, rest = [], []
+        for i in output:
+            in_prelude = id(i) in hidden_ids or (
+                isinstance(i, dict) and i.get("type") == "function_call_output"
+                and i.get("call_id") is not None and i.get("call_id") in call_ids
+            )
+            (prelude if in_prelude else rest).append(i)
+        return prelude, rest
+
     def _migrate_legacy_message(self, message: dict, convert: Callable) -> tuple[str, Optional[list]]:
-        """(outcome, items) for one stored message.
+        """(outcome, new_output) for one stored message; on converted/reflowed,
+        new_output is the FULL replacement output, with any hidden prelude
+        (OpenWebUI 0.13's skill list, memory recall) kept in front.
 
         ``convert`` is OpenWebUI's convert_output_to_messages: the check runs the
         same path the next turn will. "converted" replays byte-identical, so the
@@ -7049,12 +7074,33 @@ class Pipe:
         if message.get("role") != "assistant":
             return "skip", None
         output = message.get("output") if isinstance(message.get("output"), list) else []
-        if any(isinstance(i, dict) and i.get("type") != "message" for i in output):
-            return "skip", None  # already output items
-        replayed = (convert(output) if output else None) or [{"role": "assistant", "content": message.get("content") or ""}]
-        if len(replayed) != 1 or not isinstance(replayed[0].get("content"), str):
-            return "skip", None
-        items = self._legacy_items(replayed[0]["content"])
+        prelude, rest = self._hidden_prelude(output)
+        if any(isinstance(i, dict) and i.get("type") != "message" for i in rest):
+            return "skip", None  # real output items beyond the prelude
+
+        if prelude:
+            # The prelude is stored in front of the turn itself, and every hidden
+            # call must carry its result or the replay would not pair up.
+            if output[: len(prelude)] != prelude:
+                return "skip", None
+            result_ids = {i.get("call_id") for i in prelude if i.get("type") == "function_call_output"}
+            if any(i.get("call_id") not in result_ids for i in prelude if i.get("type") == "function_call"):
+                return "skip", None
+            replayed = convert(output)
+            head = convert(prelude)
+            if len(replayed) != len(head) + 1 or replayed[: len(head)] != head:
+                return "skip", None
+            last = replayed[-1]
+            if last.get("role") != "assistant" or last.get("tool_calls") or not isinstance(last.get("content"), str):
+                return "skip", None
+            legacy_text = last["content"]
+        else:
+            replayed = (convert(output) if output else None) or [{"role": "assistant", "content": message.get("content") or ""}]
+            if len(replayed) != 1 or not isinstance(replayed[0].get("content"), str):
+                return "skip", None
+            legacy_text = replayed[0]["content"]
+
+        items = self._legacy_items(legacy_text)
         if items is None:
             return "skip", None
 
@@ -7062,11 +7108,11 @@ class Pipe:
             return [{"role": "user", "content": "."}, *middle, {"role": "user", "content": "."}]
 
         before = self._convert_messages_to_claude_format(frame(replayed))
-        after = self._convert_messages_to_claude_format(frame(convert(items)))
+        after = self._convert_messages_to_claude_format(frame(convert(prelude + items)))
         if before[1:] == after[1:]:
-            return "converted", items
+            return "converted", prelude + items
         if before[2] == after[2] and self._legacy_comparable(before[1]) == self._legacy_comparable(after[1]):
-            return "reflowed", items
+            return "reflowed", prelude + items
         return "mismatch", None
 
     async def _migrate_legacy_chats(self, prefix: str, apply: bool) -> dict:
