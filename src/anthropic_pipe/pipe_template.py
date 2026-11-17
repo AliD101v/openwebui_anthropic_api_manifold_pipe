@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.3
+version: 0.11.4
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
@@ -40,6 +40,9 @@ Supports:
 - Task Budgets (advisory token ceiling for a full agentic turn)
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.4
+- Chats written before 0.11 no longer replay their old turns as raw HTML on OpenWebUI 0.13. 0.13 records a hidden call (the skill list) at the start of every turn, so such a turn comes back as that call, its result and then the old `<details>` text. The pipe took that text into the turn's replay and sent it as it was: thinking signatures, server tool base64 carriers and collapsible HTML as plain prose, several times the tokens of the real conversation (one 13-message chat sent 206,645 characters instead of 22,623). It goes through the old parser again, as before 0.11, so thinking, web search and tool calls replay as API blocks. Likely cause of `Request declined by Claude (reasoning extraction policy)` on those chats, which Sonnet 5.5 hit and Opus 5.5 hit sometimes. Chats written by 0.11 or newer were not affected.
+
 v0.11.3
 - Per-message effort (OpenWebUI's reasoning_effort, or an EFFORT valve change) no longer invalidates the prompt cache on models that support it (beta mid-conversation-output-config-2026-07-01: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1 / 5.2, Mythos 5.1 / 5.2). The top-level output_config.effort stays pinned to the user's EFFORT valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it.
 - Task Budgets (beta task-budgets-2026-03-13): new TASK_BUDGET_TOKENS valve (0 = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard max_tokens cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1/5.2, Mythos 5/5.1/5.2. `task_budget` goes out unchanged ({type, total}) on every request and the server keeps the countdown: this pipe resends the full history on each tool-loop request, and a lowered `remaining` would under-report the budget and invalidate the prompt-cache prefix.

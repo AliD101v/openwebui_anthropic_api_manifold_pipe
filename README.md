@@ -9,7 +9,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.11.3`
+- **Current pipe version:** `0.11.4`
 - **Recommended OpenWebUI:** `0.12.2+` (answers stream as native output items; older versions from `0.9.0+` keep the text path)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.7`, `pillow-heif>=0.18.0`
@@ -18,6 +18,7 @@
 - **Current Anthropic model docs focus on:** `Claude Fable 5.2`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, `Claude Haiku 5.5`
 - **A broken tool history no longer makes a chat unusable:** a tool call stored without its output (or an output without its call) used to make the API reject every later message in that chat with a 400 until the history was edited by hand. A final pairing check keeps an orphaned result as text and drops an unanswered call; valid histories pass through unchanged, so the prompt cache is unaffected **(added in this fork)**
 - **The cost estimate shows in the status line and the usage tooltip by default:** `SHOW_COST` did nothing while `SHOW_TOKEN_COUNT` was `Off` (the default), because the pipe only tallied usage for the token display. It now tallies whenever `SHOW_COST` is on, and the status line reads `✅ Response Complete | 💵 ≈$0.0123` even without the token gauge **(added in this fork)**
+- **Chats written before 0.11 replay as API blocks again on OpenWebUI 0.13:** their old `<details>` turns were sent to the API as raw text (thinking signatures, base64 carriers, collapsible HTML), several times the real token count, and the chat could end in `Request declined by Claude (reasoning extraction policy)`. They go through the old parser again **(added in this fork)**
 
 This pipe targets the **Anthropic Messages API** directly through the official **Anthropic Python SDK** and keeps the OpenWebUI experience close to Anthropic-native behavior while still playing nicely with OpenWebUI models, tools, filters, files, notes, channels, and task generation.
 
@@ -287,6 +288,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.11.4` **(added in this fork)**
+- Chats written before 0.11 no longer replay their old turns as raw HTML on OpenWebUI 0.13. 0.13 records a hidden call (the skill list) at the start of every turn, so such a turn comes back as that call, its result and then the old `<details>` text. The pipe took that text into the turn's replay and sent it as it was: thinking signatures, server tool base64 carriers and collapsible HTML as plain prose, several times the tokens of the real conversation (one 13-message chat sent 206,645 characters instead of 22,623). It goes through the old parser again, as before 0.11, so thinking, web search and tool calls replay as API blocks. Likely cause of `Request declined by Claude (reasoning extraction policy)` on those chats, which Sonnet 5.5 hit and Opus 5.5 hit sometimes. Chats written by 0.11 or newer were not affected.
+
 ### `v0.11.3` **(added in this fork)**
 - Per-message effort (OpenWebUI's `reasoning_effort`, or an `EFFORT` valve change) no longer invalidates the prompt cache on models that support it (beta `mid-conversation-output-config-2026-07-01`: Opus 5.5, Opus 5, Sonnet 5.5, Haiku 5.5, Fable 5.1 / 5.2, Mythos 5.1 / 5.2). The top-level `output_config.effort` stays pinned to the user's `EFFORT` valve; a deviation goes out as an effort-only mid-conversation message instead, so only models with history to protect and adaptive thinking active use it
 - Task Budgets (beta `task-budgets-2026-03-13`): new `TASK_BUDGET_TOKENS` valve (`0` = off, default) gives the model an advisory token ceiling for the whole tool loop instead of a hard `max_tokens` cliff. Supported on Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5.5, Haiku 5.5, Fable 5/5.1/5.2, Mythos 5/5.1/5.2. `task_budget` goes out unchanged (`{type, total}`) on every request and the server keeps the countdown: this pipe resends the full history on each tool-loop request, and a lowered `remaining` would under-report the budget and invalidate the prompt-cache prefix

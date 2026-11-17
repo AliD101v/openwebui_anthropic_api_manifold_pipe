@@ -565,18 +565,46 @@ def is_item_run_start(message: dict) -> bool:
     return message.get("role") == "assistant" and bool(message.get("tool_calls") or message.get("reasoning_details"))
 
 
+# What a turn written before 0.11 keeps in its text: thinking, tool calls, server tool
+# carriers and compaction as <details> HTML, hidden blocks as a link reference. The pipe
+# never writes these into an output item's text, so finding them means a legacy turn.
+LEGACY_TURN_TEXT = re.compile(
+    r'<details type="(?:reasoning|tool_calls|code_interpreter|cache-trace|compaction)"|^[ ]{0,3}\[anthropic-hidden',
+    re.MULTILINE,
+)
+
+
+def is_legacy_turn_text(message: dict) -> bool:
+    """A plain assistant message that holds a pre-0.11 turn as ``<details>`` HTML."""
+    content = message.get("content")
+    return (
+        message.get("role") == "assistant"
+        and not message.get("tool_calls")
+        and not message.get("reasoning_details")
+        and isinstance(content, str)
+        and LEGACY_TURN_TEXT.search(content) is not None
+    )
+
+
 def group_item_runs(messages: list[dict]) -> list[dict]:
     """Fold each replayed turn (assistant + tool messages) into one ``__item_run__`` entry.
 
     A run starts at an assistant message with tool calls or thinking and takes
     every following assistant/tool message up to the next user or system
     message: the text after the last tool round belongs to the same turn.
+
+    The exception is a legacy turn: OpenWebUI 0.13 records a hidden call (the skill
+    list) at the start of every turn, so a turn written by the pipe before 0.11
+    replays as a call, its result and then the old ``<details>`` text. That text must
+    not join the run, or it goes to the API as it is (thinking signatures and
+    base64 carriers as plain prose, which Anthropic can refuse as reasoning
+    extraction). It stays a plain message and takes the legacy parser.
     """
     grouped: list[dict] = []
     run: Optional[list] = None
     for msg in messages:
         role = msg.get("role")
-        if run is not None and role in ("assistant", "tool"):
+        if run is not None and role in ("assistant", "tool") and not is_legacy_turn_text(msg):
             run.append(msg)
             continue
         run = None
